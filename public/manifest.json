@@ -1,0 +1,32 @@
+{
+  "schema_version": "v1",
+  "name": "CalGPT V2",
+  "description": "Track nutrition, progress analytics, goals, and settings with an interactive ChatGPT widget.",
+  "icon": "https://figma-calgpt-project.vercel.app/icon.svg",
+  "api": {
+    "type": "mcp",
+    "url": "https://figma-calgpt-project.vercel.app/mcp"
+  },
+  "ui_component": {
+    "url": "https://figma-calgpt-project.vercel.app/component.html",
+    "display_mode": "inline"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "capabilities": {
+    "tools": [
+      { "name": "log_meal", "description": "Log a meal with calories and macros." },
+      { "name": "sync_state", "description": "Fetch daily state plus progress payload." },
+      { "name": "delete_meal", "description": "Delete a meal by ID." },
+      { "name": "update_goals", "description": "Update calorie/macro/weight goals." },
+      { "name": "log_weight", "description": "Log a weight entry." },
+      { "name": "get_progress", "description": "Get chart-ready progress analytics." },
+      { "name": "update_preferences", "description": "Update units, reminders, and profile preferences." },
+      { "name": "upload_progress_photo", "description": "Save progress photo metadata." },
+      { "name": "run_daily_checkin", "description": "Get daily deterministic coaching insights." },
+      { "name": "run_weekly_review", "description": "Get weekly summary insights." },
+      { "name": "suggest_goal_adjustments", "description": "Get recommendation-only goal adjustments." }
+    ]
+  }
+}
