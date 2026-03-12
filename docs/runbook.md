@@ -48,7 +48,7 @@
 ### Fix
 
 1. move local-only migration files out of `supabase/migrations`
-2. run `supabase migration fetch --project-ref yaaslbgenkrimghcpeay`
+2. run `supabase migration fetch --project-ref jpjxpyhuawgyrhbnnqyb`
 3. diff remote and local SQL
 4. create a reconcile migration if needed
 

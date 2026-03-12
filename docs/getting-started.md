@@ -23,13 +23,13 @@ Use the local harness for quick widget and gateway inspection.
 
 ### Vercel
 
-- `SUPABASE_URL=https://yaaslbgenkrimghcpeay.supabase.co`
+- `SUPABASE_URL=https://jpjxpyhuawgyrhbnnqyb.supabase.co`
 - `SUPABASE_ANON_KEY=<anon key>`
-- `SUPABASE_MCP_ENDPOINT=https://yaaslbgenkrimghcpeay.supabase.co/functions/v1/server/mcp`
+- `SUPABASE_MCP_ENDPOINT=https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp`
 
 ### Supabase function secrets
 
-- `SUPABASE_URL=https://yaaslbgenkrimghcpeay.supabase.co`
+- `SUPABASE_URL=https://jpjxpyhuawgyrhbnnqyb.supabase.co`
 - `SUPABASE_SERVICE_ROLE_KEY=<service role key>`
 - `ALLOW_DEMO_MODE=false`
 

@@ -5,7 +5,7 @@
 - Public MCP URL: `https://figma-calgpt-project.vercel.app/mcp`
 - Diagnostic MCP URL: `https://figma-calgpt-project.vercel.app/api/mcp`
 - Widget URI: `ui://widget/gpt-calories-v4.html`
-- Supabase function endpoint: `https://yaaslbgenkrimghcpeay.supabase.co/functions/v1/server/mcp`
+- Supabase function endpoint: `https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp`
 
 ## Required Configuration
 
@@ -34,13 +34,13 @@
 2. Apply SQL changes:
 
 ```bash
-supabase db push --project-ref yaaslbgenkrimghcpeay
+supabase db push --project-ref jpjxpyhuawgyrhbnnqyb
 ```
 
 3. Deploy Supabase function:
 
 ```bash
-supabase functions deploy server --project-ref yaaslbgenkrimghcpeay
+supabase functions deploy server --project-ref jpjxpyhuawgyrhbnnqyb
 ```
 
 4. Deploy Vercel from latest `main`.
@@ -50,7 +50,7 @@ supabase functions deploy server --project-ref yaaslbgenkrimghcpeay
 ### Direct Supabase probe
 
 ```bash
-curl -i 'https://yaaslbgenkrimghcpeay.supabase.co/functions/v1/server/mcp' \
+curl -i 'https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp' \
   -H "Authorization: Bearer <SUPABASE_ANON_KEY>" \
   -H "apikey: <SUPABASE_ANON_KEY>" \
   -H 'content-type: application/json' \
@@ -90,7 +90,7 @@ MCP_BASE_URL=https://figma-calgpt-project.vercel.app/mcp npm run smoke:mcp
 If `db push` or `db pull` fails because local and remote histories differ:
 
 1. preserve local-only migrations outside `supabase/migrations`
-2. run `supabase migration fetch --project-ref yaaslbgenkrimghcpeay`
+2. run `supabase migration fetch --project-ref jpjxpyhuawgyrhbnnqyb`
 3. diff fetched SQL against local work
 4. add a reconcile migration if needed
 5. avoid `migration repair --status reverted` unless schema rollback is intentional
