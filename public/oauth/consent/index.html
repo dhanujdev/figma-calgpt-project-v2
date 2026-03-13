@@ -353,11 +353,21 @@
           },
         });
 
+        // Always require a fresh sign-in tied to this authorization request.
+        // A stale existing session won't be associated with the current authorization_id
+        // and Supabase will reject approveAuthorization with 400 validation_failed.
+        const hasReturnedFromOAuth = window.location.hash.includes("access_token") ||
+          new URLSearchParams(window.location.search).has("code");
+
         const {
           data: { session },
         } = await supabaseClient.auth.getSession();
 
-        if (!session) {
+        if (!session || !hasReturnedFromOAuth) {
+          // Sign out any stale session so the fresh Google sign-in is tied to this auth request
+          if (session) {
+            await supabaseClient.auth.signOut({ scope: "local" });
+          }
           clientNode.textContent = "Google sign-in required";
           setScopes([]);
           renderUnauthenticated(config.provider || "google");
