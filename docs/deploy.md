@@ -15,12 +15,14 @@
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_MCP_ENDPOINT`
 - `MCP_AUTH_MODE=noauth` for the current ChatGPT connector path
+- `MCP_DEFAULT_TIMEZONE=America/New_York`
 
 ### Supabase function secrets
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `ALLOW_DEMO_MODE=false`
+- `MCP_DEFAULT_TIMEZONE=America/New_York`
 
 ### Optional Vercel OAuth overrides
 

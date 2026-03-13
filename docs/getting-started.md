@@ -27,12 +27,14 @@ Use the local harness for quick widget and gateway inspection.
 - `SUPABASE_ANON_KEY=<anon key>`
 - `SUPABASE_MCP_ENDPOINT=https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp`
 - `MCP_AUTH_MODE=noauth`
+- `MCP_DEFAULT_TIMEZONE=America/New_York`
 
 ### Supabase function secrets
 
 - `SUPABASE_URL=https://jpjxpyhuawgyrhbnnqyb.supabase.co`
 - `SUPABASE_SERVICE_ROLE_KEY=<service role key>`
 - `ALLOW_DEMO_MODE=false`
+- `MCP_DEFAULT_TIMEZONE=America/New_York`
 
 Do not put `SUPABASE_SERVICE_ROLE_KEY` in Vercel.
 

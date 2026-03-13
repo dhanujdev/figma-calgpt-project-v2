@@ -41,6 +41,7 @@ export interface DailyState {
 
 type RequestContext = {
   authHeader?: string | null;
+  timeZone?: string | null;
 };
 
 type UserIdentity = {
@@ -58,6 +59,7 @@ type WeightPoint = {
 
 const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
 const ALLOW_DEMO_MODE = Deno.env.get("ALLOW_DEMO_MODE") !== "false";
+const DEFAULT_TIMEZONE = Deno.env.get("MCP_DEFAULT_TIMEZONE")?.trim() || "America/New_York";
 
 const DEFAULT_GOALS = {
   calories: 2000,
@@ -103,17 +105,57 @@ function dbClient(): DbClient {
   });
 }
 
-function todayIsoDate() {
-  return new Date().toISOString().split("T")[0];
+function resolveTimeZone(raw?: string | null) {
+  const candidate = raw?.trim() || DEFAULT_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return "America/New_York";
+  }
 }
 
-function normalizeDate(raw?: string): string {
-  if (!raw) return todayIsoDate();
+function isoDateInTimeZone(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+  if (!year || !month || !day) {
+    throw new Error(`Failed to format date in timezone ${timeZone}`);
+  }
+  return `${year}-${month}-${day}`;
+}
+
+function addDaysToIsoDate(isoDate: string, days: number) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day, 12));
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().split("T")[0];
+}
+
+function weekdayLabel(isoDate: string, timeZone: string) {
+  return new Date(`${isoDate}T12:00:00.000Z`).toLocaleDateString("en-US", {
+    weekday: "short",
+    timeZone,
+  });
+}
+
+function todayIsoDate(timeZone?: string | null) {
+  return isoDateInTimeZone(new Date(), resolveTimeZone(timeZone));
+}
+
+function normalizeDate(raw?: string, timeZone?: string | null): string {
+  if (!raw) return todayIsoDate(timeZone);
   const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (match) return raw;
   const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return todayIsoDate();
-  return parsed.toISOString().split("T")[0];
+  if (Number.isNaN(parsed.getTime())) return todayIsoDate(timeZone);
+  return isoDateInTimeZone(parsed, resolveTimeZone(timeZone));
 }
 
 function parseBearer(authHeader?: string | null): string | null {
@@ -617,12 +659,10 @@ async function buildDailyState(supabase: DbClient, userId: string, date: string)
   };
 }
 
-function rangeStart(range: string): string {
+function rangeStart(range: string, timeZone?: string | null): string {
   const normalized = range.toUpperCase();
   const days = RANGE_DAYS[normalized] ?? RANGE_DAYS["90D"];
-  const start = new Date();
-  start.setUTCDate(start.getUTCDate() - days);
-  return start.toISOString().split("T")[0];
+  return addDaysToIsoDate(todayIsoDate(timeZone), -days);
 }
 
 function average(values: number[]) {
@@ -635,9 +675,10 @@ function round(value: number, decimals = 1) {
   return Math.round(value * pow) / pow;
 }
 
-function weightChangeSummary(weightSeries: WeightPoint[]) {
+function weightChangeSummary(weightSeries: WeightPoint[], timeZone?: string | null) {
   const spans = [3, 7, 14, 30, 90];
   const latest = weightSeries.at(-1)?.weight;
+  const today = todayIsoDate(timeZone);
 
   const entries = spans.map((span) => {
     if (latest == null) {
@@ -648,9 +689,7 @@ function weightChangeSummary(weightSeries: WeightPoint[]) {
       };
     }
 
-    const targetDate = new Date();
-    targetDate.setUTCDate(targetDate.getUTCDate() - span);
-    const targetIso = targetDate.toISOString().split("T")[0];
+    const targetIso = addDaysToIsoDate(today, -span);
 
     const baseline = [...weightSeries]
       .reverse()
@@ -682,10 +721,12 @@ async function buildProgress(
   supabase: DbClient,
   userId: string,
   range: string,
+  timeZone?: string | null,
 ) {
   const normalizedRange = range.toUpperCase();
-  const startDate = rangeStart(normalizedRange);
-  const today = todayIsoDate();
+  const resolvedTimeZone = resolveTimeZone(timeZone);
+  const startDate = rangeStart(normalizedRange, resolvedTimeZone);
+  const today = todayIsoDate(resolvedTimeZone);
 
   const [
     { data: weights, error: weightsError },
@@ -757,14 +798,12 @@ async function buildProgress(
   }));
 
   const weeklyPoints = Array.from({ length: 7 }).map((_, i) => {
-    const day = new Date();
-    day.setUTCDate(day.getUTCDate() - (6 - i));
-    const iso = day.toISOString().split("T")[0];
+    const iso = addDaysToIsoDate(today, -(6 - i));
     const dayData = calorieSeries.find((entry) => entry.date === iso);
     const consumed = Number(dayData?.calories ?? 0);
     const burned = Math.max(0, Math.round(Number(goals.calories ?? 2000) * 0.6));
     return {
-      day: day.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" }),
+      day: weekdayLabel(iso, resolvedTimeZone),
       consumed,
       burned,
     };
@@ -783,12 +822,11 @@ async function buildProgress(
     .sort();
 
   let streakCurrent = 0;
-  const cursor = new Date();
+  let cursorIso = today;
   while (true) {
-    const iso = cursor.toISOString().split("T")[0];
-    if (!streakBase.includes(iso)) break;
+    if (!streakBase.includes(cursorIso)) break;
     streakCurrent += 1;
-    cursor.setUTCDate(cursor.getUTCDate() - 1);
+    cursorIso = addDaysToIsoDate(cursorIso, -1);
   }
 
   const derivedBadges = [
@@ -801,7 +839,7 @@ async function buildProgress(
     new Set([...(badges ?? []).map((badge) => String(badge.badge_code)), ...derivedBadges]),
   );
 
-  const weightChanges = weightChangeSummary(weightSeries);
+  const weightChanges = weightChangeSummary(weightSeries, resolvedTimeZone);
 
   return {
     range: normalizedRange,
@@ -826,11 +864,9 @@ async function buildProgress(
     streak: {
       current: streakCurrent,
       week: Array.from({ length: 7 }).map((_, i) => {
-        const day = new Date();
-        day.setUTCDate(day.getUTCDate() - (6 - i));
-        const iso = day.toISOString().split("T")[0];
+        const iso = addDaysToIsoDate(today, -(6 - i));
         return {
-          day: day.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" }).slice(0, 1),
+          day: weekdayLabel(iso, resolvedTimeZone).slice(0, 1),
           hit: streakBase.includes(iso),
         };
       }),
@@ -844,11 +880,16 @@ async function buildProgress(
   };
 }
 
-async function fetchStateAndProgress(userId: string, date: string, range: string) {
+async function fetchStateAndProgress(
+  userId: string,
+  date: string,
+  range: string,
+  timeZone?: string | null,
+) {
   const supabase = dbClient();
   const [state, progress] = await Promise.all([
     buildDailyState(supabase, userId, date),
-    buildProgress(supabase, userId, range),
+    buildProgress(supabase, userId, range, timeZone),
   ]);
 
   return { state, progress };
@@ -872,7 +913,7 @@ export async function logMeal(
   }
 
   const identity = await resolveIdentity(context);
-  const loggedDate = normalizeDate(params.date);
+  const loggedDate = normalizeDate(params.date, context?.timeZone);
 
   if (!(await isSchemaReady())) {
     const state = await legacyGetState(loggedDate);
@@ -937,7 +978,7 @@ export async function syncState(
   context?: RequestContext,
 ) {
   const identity = await resolveIdentity(context);
-  const date = normalizeDate(params.date);
+  const date = normalizeDate(params.date, context?.timeZone);
   const range = String(params.range ?? "90D").toUpperCase();
 
   if (!(await isSchemaReady())) {
@@ -954,7 +995,7 @@ export async function syncState(
 
   const userId = identity.userId;
 
-  const { state, progress } = await fetchStateAndProgress(userId, date, range);
+  const { state, progress } = await fetchStateAndProgress(userId, date, range, context?.timeZone);
 
   return {
     success: true,
@@ -972,7 +1013,7 @@ export async function deleteMeal(params: { meal_id: string; date?: string }, con
   }
 
   const identity = await resolveIdentity(context);
-  const date = normalizeDate(params.date);
+  const date = normalizeDate(params.date, context?.timeZone);
 
   if (!(await isSchemaReady())) {
     const state = await legacyGetState(date);
@@ -1033,7 +1074,7 @@ export async function updateGoals(
   context?: RequestContext,
 ) {
   const identity = await resolveIdentity(context);
-  const date = normalizeDate(params.date);
+  const date = normalizeDate(params.date, context?.timeZone);
 
   if (!(await isSchemaReady())) {
     const state = await legacyGetState(date);
@@ -1113,7 +1154,7 @@ export async function logWeight(
     return { success: false, error: "weight is required" };
   }
 
-  const entryDate = normalizeDate(params.date);
+  const entryDate = normalizeDate(params.date, context?.timeZone);
   const range = String(params.range ?? "90D").toUpperCase();
 
   if (!(await isSchemaReady())) {
@@ -1153,7 +1194,7 @@ export async function logWeight(
     { onConflict: "user_id,badge_code" },
   );
 
-  const progress = await buildProgress(supabase, userId, range);
+  const progress = await buildProgress(supabase, userId, range, context?.timeZone);
 
   return {
     success: true,
@@ -1172,7 +1213,7 @@ export async function getProgress(
   const range = String(params.range ?? "90D").toUpperCase();
 
   if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate());
+    const state = await legacyGetState(todayIsoDate(context?.timeZone));
     return {
       success: true,
       progress: legacyProgressFromState(state, range),
@@ -1183,7 +1224,7 @@ export async function getProgress(
   const userId = identity.userId;
   const supabase = dbClient();
 
-  const progress = await buildProgress(supabase, userId, range);
+  const progress = await buildProgress(supabase, userId, range, context?.timeZone);
 
   return {
     success: true,
@@ -1212,7 +1253,7 @@ export async function updatePreferences(
   }
 
   if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate());
+    const state = await legacyGetState(todayIsoDate(context?.timeZone));
     if (params.unit_weight) state.preferences.unitWeight = params.unit_weight;
     if (params.unit_energy) state.preferences.unitEnergy = params.unit_energy;
     if (params.language) state.preferences.language = params.language;
@@ -1332,7 +1373,7 @@ export async function runDailyCheckin(
   context?: RequestContext,
 ) {
   const identity = await resolveIdentity(context);
-  const date = normalizeDate(params.date);
+  const date = normalizeDate(params.date, context?.timeZone);
   const range = String(params.range ?? "90D").toUpperCase();
 
   if (!(await isSchemaReady())) {
@@ -1356,7 +1397,7 @@ export async function runDailyCheckin(
 
   const userId = identity.userId;
 
-  const { state, progress } = await fetchStateAndProgress(userId, date, range);
+  const { state, progress } = await fetchStateAndProgress(userId, date, range, context?.timeZone);
   const recommendations: string[] = [];
 
   if (state.totalCalories < state.goals.calories * 0.5) {
@@ -1399,7 +1440,7 @@ export async function runWeeklyReview(
   const identity = await resolveIdentity(context);
 
   if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate());
+    const state = await legacyGetState(todayIsoDate(context?.timeZone));
     return {
       success: true,
       review: {
@@ -1416,7 +1457,7 @@ export async function runWeeklyReview(
 
   const userId = identity.userId;
   const supabase = dbClient();
-  const progress = await buildProgress(supabase, userId, "90D");
+  const progress = await buildProgress(supabase, userId, "90D", context?.timeZone);
 
   const lastWeek = progress.weeklyEnergy.daily;
   const consumedAverage = round(average(lastWeek.map((point) => point.consumed)), 0);
@@ -1462,7 +1503,7 @@ export async function suggestGoalAdjustments(
   const identity = await resolveIdentity(context);
 
   if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate());
+    const state = await legacyGetState(todayIsoDate(context?.timeZone));
     return {
       success: true,
       suggestion: {
@@ -1493,7 +1534,7 @@ export async function suggestGoalAdjustments(
 
   const [goals, progress] = await Promise.all([
     ensureGoals(supabase, userId),
-    buildProgress(supabase, userId, "90D"),
+    buildProgress(supabase, userId, "90D", context?.timeZone),
   ]);
 
   const weeklyAverageCalories = progress.dailyAverageCalories;

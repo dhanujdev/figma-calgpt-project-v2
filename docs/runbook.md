@@ -68,6 +68,24 @@
 2. add cleanup or uniqueness migration if duplicates are real data, not a code bug
 3. retest direct function and Vercel MCP paths
 
+## 5) Day Rolls Over Too Early
+
+### Symptom
+
+- ChatGPT says "today" is one date
+- logged meals or synced state appear under the next UTC day
+- this is most visible in US evening hours
+
+### Root Cause
+
+- MCP gateway or Supabase runtime is defaulting day calculations to UTC instead of the configured user timezone
+
+### Fix
+
+1. set `MCP_DEFAULT_TIMEZONE` on Vercel and Supabase
+2. redeploy Vercel and the `server` edge function
+3. verify `sync_state` and `log_meal` return the expected local `YYYY-MM-DD`
+
 ## Healthy State Checklist
 
 1. direct Supabase function probe returns `200`

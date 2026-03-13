@@ -15,6 +15,7 @@ type RpcContext = {
   appOrigin: string;
   supabaseUrl?: string;
   incomingAuthHeader?: string;
+  incomingTimeZone?: string;
 };
 
 const SERVER_INFO = {
@@ -31,6 +32,7 @@ const OAUTH2_SCHEME = {
 } as const;
 const AUTH_MODE = process.env.MCP_AUTH_MODE?.trim().toLowerCase() === "oauth" ? "oauth" : "noauth";
 const OAUTH_ENABLED = AUTH_MODE === "oauth";
+const DEFAULT_TIMEZONE = process.env.MCP_DEFAULT_TIMEZONE?.trim() || "America/New_York";
 const TOOL_SECURITY_SCHEMES = OAUTH_ENABLED
   ? ([NOAUTH_SCHEME, OAUTH2_SCHEME] as const)
   : ([NOAUTH_SCHEME] as const);
@@ -404,6 +406,7 @@ async function callSupabaseTool(
   name: string,
   args: Record<string, unknown>,
   incomingAuthHeader?: string,
+  incomingTimeZone?: string,
 ) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
@@ -431,6 +434,10 @@ async function callSupabaseTool(
 
   if (incomingAuthHeader) {
     headers["X-User-Authorization"] = incomingAuthHeader;
+  }
+
+  if (incomingTimeZone) {
+    headers["X-User-Timezone"] = incomingTimeZone;
   }
 
   let lastError = "Supabase function call failed";
@@ -580,6 +587,7 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
         toolName,
         toolArgs,
         context.incomingAuthHeader,
+        context.incomingTimeZone,
       );
 
       if (toolResult.authRequired) {
@@ -643,11 +651,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const appOrigin = `${proto.split(",")[0].trim() || "https"}://${safeHost}`;
 
   const incomingAuth = (req.headers["authorization"] ?? null) as string | null;
+  const incomingTimeZoneHeader = (req.headers["x-user-timezone"] ??
+    req.headers["x-timezone"] ??
+    null) as string | string[] | null;
+  const incomingTimeZone = Array.isArray(incomingTimeZoneHeader)
+    ? incomingTimeZoneHeader[0]
+    : incomingTimeZoneHeader;
 
   const context: RpcContext = {
     appOrigin,
     supabaseUrl: process.env.SUPABASE_URL,
     incomingAuthHeader: incomingAuth,
+    incomingTimeZone: incomingTimeZone?.trim() || DEFAULT_TIMEZONE,
   };
 
   if (req.method === "OPTIONS") {

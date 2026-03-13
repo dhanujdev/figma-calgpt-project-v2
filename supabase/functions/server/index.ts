@@ -19,7 +19,8 @@ app.use(
 
 function requestContext(c: { req: { header: (key: string) => string | undefined } }) {
   const authHeader = c.req.header("x-user-authorization") ?? c.req.header("authorization");
-  return { authHeader };
+  const timeZone = c.req.header("x-user-timezone") ?? c.req.header("x-timezone");
+  return { authHeader, timeZone };
 }
 
 async function handleMcp(c: any) {
