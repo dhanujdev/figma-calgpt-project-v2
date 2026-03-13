@@ -238,29 +238,20 @@
       }
     }
 
-    function renderUnauthenticated(provider) {
+    function renderUnauthenticated(supabaseUrl) {
       actionsNode.innerHTML = "";
       const button = document.createElement("button");
       button.className = "primary";
       button.textContent = "Continue with Google";
-      button.addEventListener("click", async () => {
-        try {
-          setBusy("Redirecting to Google sign-in...");
-          const redirectTo = window.location.origin + window.location.pathname + window.location.search;
-          const { error } = await supabaseClient.auth.signInWithOAuth({
-            provider,
-            options: {
-              redirectTo,
-              queryParams: { access_type: "offline", prompt: "consent" },
-            },
-          });
-          if (error) {
-            throw error;
-          }
-        } catch (error) {
-          setStatus(String(error.message || error), "error");
-          renderUnauthenticated(provider);
-        }
+      button.addEventListener("click", () => {
+        setBusy("Redirecting to Google sign-in...");
+        // Sign in via Supabase's authorization endpoint so the resulting session
+        // is tied to this authorization request. A standalone signInWithOAuth
+        // call creates an unlinked session that Supabase's consent endpoint rejects.
+        const redirectTo = encodeURIComponent(window.location.href);
+        window.location.assign(
+          `${supabaseUrl}/auth/v1/authorize?provider=google&redirect_to=${redirectTo}&access_type=offline&prompt=consent`
+        );
       });
       actionsNode.appendChild(button);
       setStatus("Sign in with Google to continue the ChatGPT connection.", null);
@@ -370,7 +361,7 @@
           }
           clientNode.textContent = "Google sign-in required";
           setScopes([]);
-          renderUnauthenticated(config.provider || "google");
+          renderUnauthenticated(config.supabaseUrl);
           return;
         }
 
