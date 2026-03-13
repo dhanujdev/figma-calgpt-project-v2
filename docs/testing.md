@@ -14,6 +14,7 @@ Current gate:
 4. `check:ui-shell`
 5. `build`
 6. `smoke:mcp` when `MCP_BASE_URL` is set
+7. scheduled GitHub Actions production smoke every 30 minutes
 
 ## Live MCP Smoke
 
@@ -26,6 +27,16 @@ Diagnostic fallback:
 ```bash
 MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/api/mcp npm run smoke:mcp
 ```
+
+## Scheduled Production Health Check
+
+GitHub Actions runs `.github/workflows/health-check.yml` every 30 minutes and on manual dispatch. It executes:
+
+```bash
+MCP_AUTH_MODE=oauth MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
+```
+
+If the scheduled run fails, use the failed workflow run as the incident starting point and continue with [Runbook](./runbook.md).
 
 ## Production Acceptance
 

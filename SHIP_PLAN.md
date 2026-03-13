@@ -19,6 +19,7 @@
 - 2026-03-13: Phase 7 started. The unused React/shadcn surface was removed, runtime dependencies dropped to 6, and strict tests plus live OAuth smoke still passed after the cleanup batch.
 - 2026-03-13: Phase 7 hardening continued. The Supabase edge runtime now emits structured JSON logs for requests, unknown methods, MCP failures, and analytics write failures, and `tests/unit/logging.test.ts` verifies the log payloads are parseable.
 - 2026-03-13: Phase 7 hardening continued with shared write rate limiting. Mutating tools now share a 3-writes-in-10-seconds cap backed by `analytics_events`, MCP failures return `failureClass: "rate_limited"` with `retryAfterSeconds`, and direct REST write routes map that failure to HTTP 429.
+- 2026-03-13: Phase 7 monitoring continued with a scheduled GitHub Actions production smoke. `.github/workflows/health-check.yml` now runs the OAuth MCP smoke against production every 30 minutes and on manual dispatch.
 
 ## Current Phase Status
 
@@ -31,7 +32,7 @@
 | 4. Beta UX & Onboarding | Done | Onboarding guidance, empty states, and prompt cookbook shipped |
 | 5. Read-Only Widget Polish & Trust | Done | Agent-only writes, trust feedback, and polished read-only widget shipped |
 | 6. Instrumentation & Retention | Done | Event capture, reporting views, and beta SQL analysis shipped |
-| 7. Strip Dead Weight & Harden | In Progress | Cleanup, structured logging, and rate limiting shipped; Sentry and bundle-size target remain |
+| 7. Strip Dead Weight & Harden | In Progress | Cleanup, structured logging, rate limiting, and scheduled production smoke shipped; Sentry and bundle-size target remain |
 
 ## Product Alignment Update
 
