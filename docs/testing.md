@@ -41,15 +41,26 @@ MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/api/mcp npm run smoke:mc
 - `GET /.well-known/oauth-protected-resource` -> `200` only when `MCP_AUTH_MODE=oauth`
 - `GET /.well-known/oauth-authorization-server` -> `200` only when `MCP_AUTH_MODE=oauth`
 - otherwise both routes should return `404`
+- unauthenticated `tools/call` responses should include `_meta["mcp/www_authenticate"]`
 
 ### ChatGPT checks
 
 1. Open the app from ChatGPT.
-2. Log a meal.
-3. Confirm totals and meals update in the widget.
-4. Ask for progress.
-5. Update goals or preferences.
-6. Confirm no endpoint or method errors appear.
+2. If prompted, sign in with Google through Supabase Auth.
+3. Log a meal.
+4. Confirm totals and meals update in the widget.
+5. Ask for progress.
+6. Update goals or preferences.
+7. Confirm no endpoint or method errors appear.
+
+### Beta metrics checks
+
+1. Open Supabase SQL editor.
+2. Run `select * from public.beta_funnel_summary;`
+3. Run `select * from public.beta_prompt_dropoff;`
+4. Run `select * from public.beta_empty_state_recovery;`
+5. Run `select * from public.beta_retention_summary order by cohort_date desc limit 14;`
+6. Confirm rows reflect recent production activity.
 
 ## Failure Triage Order
 

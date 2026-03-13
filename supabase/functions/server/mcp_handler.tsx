@@ -1,5 +1,5 @@
 import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
-import * as kv from "./kv_store.tsx";
+import { logEvent } from "./logging.ts";
 
 export interface Meal {
   id: string;
@@ -9,11 +9,27 @@ export interface Meal {
   carbs: number;
   fats: number;
   timestamp: string;
+  estimationNotes?: string | null;
+}
+
+export interface AgentNote {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+export interface OnboardingGuide {
+  isNewUser: boolean;
+  summary: string;
+  suggestedPrompt: string;
+  starterPrompts: string[];
 }
 
 export interface DailyState {
   date: string;
   meals: Meal[];
+  agentNotes: AgentNote[];
+  onboarding: OnboardingGuide;
   totalCalories: number;
   totalProtein: number;
   totalCarbs: number;
@@ -42,12 +58,22 @@ export interface DailyState {
 type RequestContext = {
   authHeader?: string | null;
   timeZone?: string | null;
+  resource?: string | null;
+  source?: string | null;
+  widgetVersion?: string | null;
+};
+
+type AccessTokenClaims = {
+  aud: string[];
+  scope: string[];
+  clientId?: string | null;
 };
 
 type UserIdentity = {
   userId: string;
   authenticated: boolean;
   authError?: string;
+  tokenClaims?: AccessTokenClaims | null;
 };
 
 type DbClient = ReturnType<typeof createClient>;
@@ -57,9 +83,70 @@ type WeightPoint = {
   weight: number;
 };
 
+type RecentMealSummary = {
+  name: string;
+  frequency: number;
+  lastLoggedAt: string;
+  avgCalories: number;
+  avgProtein: number;
+  avgCarbs: number;
+  avgFats: number;
+};
+
+type DailyTotalSnapshot = {
+  date: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fats: number;
+  meals: number;
+};
+
+type RecentMealPatternSnapshot = {
+  loggedDate: string;
+  consumedAt: string;
+};
+
+type CoachingPattern = {
+  code:
+    | "protein_deficit"
+    | "calorie_overconsumption"
+    | "skipped_meals"
+    | "late_night_eating"
+    | "weight_plateau"
+    | "weight_goal_projection"
+    | "streak_milestone"
+    | "macro_imbalance";
+  message: string;
+  action: string;
+  severity: "positive" | "warning";
+  badgeCode?: string;
+};
+
+type GoalProjection = {
+  direction: "loss" | "gain";
+  weeklyRate: number;
+  daysToGoal: number;
+  projectedDate: string;
+};
+
+type AnalyticsEventName =
+  | "dashboard_open"
+  | "meal_logged"
+  | "weight_logged"
+  | "daily_checkin_run"
+  | "weekly_review_run"
+  | "goals_updated"
+  | "preferences_updated"
+  | "write_attempt"
+  | "write_rate_limited"
+  | "tool_error";
+
 const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
 const ALLOW_DEMO_MODE = Deno.env.get("ALLOW_DEMO_MODE") !== "false";
 const DEFAULT_TIMEZONE = Deno.env.get("MCP_DEFAULT_TIMEZONE")?.trim() || "America/New_York";
+const REQUIRED_OAUTH_SCOPE = "openid";
+const SUPABASE_DEFAULT_AUDIENCE = "authenticated";
 
 const DEFAULT_GOALS = {
   calories: 2000,
@@ -81,6 +168,51 @@ const DEFAULT_PREFERENCES = {
   streak_badge_notifications: true,
   height_cm: 170,
 };
+
+const STARTER_PROMPTS = [
+  "Show my dashboard.",
+  "Log breakfast: Greek yogurt, berries, and granola for 350 calories.",
+  "Log my weight as 75.8 kg.",
+  "Run my daily check-in.",
+  "Run my weekly review.",
+];
+
+const WRITE_RATE_LIMIT_WINDOW_MS = 10_000;
+const WRITE_RATE_LIMIT_MAX_ATTEMPTS = 3;
+const WRITE_RATE_LIMIT_RETRY_SECONDS = WRITE_RATE_LIMIT_WINDOW_MS / 1000;
+
+// --- Validation helpers ---
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LEGACY_ID_RE = /^meal_\d+_[a-z0-9]+$/;
+const NOTE_KEY_RE = /^[a-z0-9]+(?::[a-z0-9_-]+)*$/;
+
+function clampPositive(value: unknown, fallback: number, max: number): number {
+  const num = Number(value);
+  if (Number.isNaN(num) || num < 0) return fallback;
+  return Math.min(num, max);
+}
+
+function sanitizeText(value: unknown, maxLen: number): string {
+  const str = String(value ?? "").replace(/[<>"'&]/g, "");
+  return str.slice(0, maxLen);
+}
+
+function sanitizeNoteKey(value: unknown, maxLen: number): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_-]/g, "")
+    .replace(/:{2,}/g, ":")
+    .replace(/^[:_-]+|[:_-]+$/g, "")
+    .slice(0, maxLen);
+}
+
+function isValidIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+// --- Range / constants ---
 
 const RANGE_DAYS: Record<string, number> = {
   "7D": 7,
@@ -151,17 +283,267 @@ function todayIsoDate(timeZone?: string | null) {
 
 function normalizeDate(raw?: string, timeZone?: string | null): string {
   if (!raw) return todayIsoDate(timeZone);
-  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (match) return raw;
+  if (isValidIsoDate(raw)) return raw;
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) return todayIsoDate(timeZone);
   return isoDateInTimeZone(parsed, resolveTimeZone(timeZone));
 }
 
+function mealCountLabel(count: number) {
+  return `${count} meal${count === 1 ? "" : "s"}`;
+}
+
+function summarizeDailyCalories(state: DailyState) {
+  return `Today is ${Math.round(state.totalCalories)}/${Math.round(state.goals.calories)} calories across ${mealCountLabel(state.meals.length)}.`;
+}
+
+function summarizeGoalChanges(
+  params: {
+    calories?: number;
+    protein?: number;
+    carbs?: number;
+    fats?: number;
+    goal_weight?: number;
+    start_weight?: number;
+    target_date?: string;
+  },
+  goals: DailyState["goals"],
+) {
+  const details: string[] = [];
+  if (params.calories != null) details.push(`calories ${Math.round(goals.calories)} kcal`);
+  if (params.protein != null) details.push(`protein ${Math.round(goals.protein)} g`);
+  if (params.carbs != null) details.push(`carbs ${Math.round(goals.carbs)} g`);
+  if (params.fats != null) details.push(`fats ${Math.round(goals.fats)} g`);
+  if (params.goal_weight != null && goals.goalWeight != null) details.push(`goal weight ${goals.goalWeight.toFixed(1)} kg`);
+  if (params.start_weight != null && goals.startWeight != null) details.push(`start weight ${goals.startWeight.toFixed(1)} kg`);
+  if (params.target_date != null && goals.targetDate) details.push(`target date ${goals.targetDate}`);
+  return details;
+}
+
+function summarizePreferenceChanges(
+  params: {
+    unit_weight?: "kg" | "lb";
+    unit_energy?: "kcal" | "kj";
+    language?: string;
+    reminder_enabled?: boolean;
+    reminder_time?: string;
+    theme_preset?: string;
+    streak_badge_notifications?: boolean;
+    height_cm?: number;
+  },
+  preferences: Record<string, unknown>,
+) {
+  const details: string[] = [];
+  if (params.unit_weight != null) details.push(`weight unit ${String(preferences.unit_weight ?? params.unit_weight)}`);
+  if (params.unit_energy != null) details.push(`energy unit ${String(preferences.unit_energy ?? params.unit_energy)}`);
+  if (params.language != null) details.push(`language ${String(preferences.language ?? params.language)}`);
+  if (params.reminder_enabled != null) details.push(`reminders ${Boolean(preferences.reminder_enabled) ? "on" : "off"}`);
+  if (params.reminder_time != null) details.push(`reminder time ${String(preferences.reminder_time ?? params.reminder_time)}`);
+  if (params.theme_preset != null) details.push(`theme ${String(preferences.theme_preset ?? params.theme_preset)}`);
+  if (params.streak_badge_notifications != null) {
+    details.push(`badge notifications ${Boolean(preferences.streak_badge_notifications) ? "on" : "off"}`);
+  }
+  if (params.height_cm != null) details.push(`height ${Math.round(Number(preferences.height_cm ?? params.height_cm))} cm`);
+  return details;
+}
+
+async function recordAnalyticsEvent(
+  supabase: DbClient,
+  {
+    userId,
+    eventName,
+    toolName,
+    page,
+    failureClass,
+    detail,
+    context,
+  }: {
+    userId: string;
+    eventName: AnalyticsEventName;
+    toolName: string;
+    page?: string | null;
+    failureClass?: string | null;
+    detail?: Record<string, unknown>;
+    context?: RequestContext;
+  },
+) {
+  try {
+    const { error } = await supabase.from("analytics_events").insert({
+      user_id: userId,
+      event_name: eventName,
+      tool_name: toolName,
+      page: page ?? null,
+      source: context?.source ?? "direct",
+      widget_version: context?.widgetVersion ?? null,
+      failure_class: failureClass ?? null,
+      detail: detail ?? {},
+      created_at: new Date().toISOString(),
+    });
+
+    if (error) {
+      logEvent("error", "analytics.record_failed", {
+        userId,
+        eventName,
+        toolName,
+        page: page ?? null,
+        source: context?.source ?? "direct",
+        widgetVersion: context?.widgetVersion ?? null,
+        error,
+      });
+    }
+  } catch (error) {
+    logEvent("error", "analytics.record_failed", {
+      userId,
+      eventName,
+      toolName,
+      page: page ?? null,
+      source: context?.source ?? "direct",
+      widgetVersion: context?.widgetVersion ?? null,
+      error,
+    });
+  }
+}
+
+function rateLimitedResult() {
+  return {
+    success: false,
+    error: "Too many write actions. Try again in a few seconds.",
+    failureClass: "rate_limited",
+    retryAfterSeconds: WRITE_RATE_LIMIT_RETRY_SECONDS,
+  };
+}
+
+async function enforceWriteRateLimit(
+  supabase: DbClient,
+  userId: string,
+  toolName: string,
+  context?: RequestContext,
+) {
+  const windowStart = new Date(Date.now() - WRITE_RATE_LIMIT_WINDOW_MS).toISOString();
+  const { data, error } = await supabase
+    .from("analytics_events")
+    .select("event_name, created_at")
+    .eq("user_id", userId)
+    .gte("created_at", windowStart)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "tool_error",
+      toolName,
+      failureClass: "db_error",
+      detail: { reason: error.message, phase: "rate_limit_lookup" },
+      context,
+    });
+    return { success: false, error: error.message, failureClass: "db_error" } as const;
+  }
+
+  const attemptsInWindow = (data ?? []).filter((row) => String((row as Record<string, unknown>).event_name ?? "") === "write_attempt").length;
+
+  if (attemptsInWindow >= WRITE_RATE_LIMIT_MAX_ATTEMPTS) {
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "write_rate_limited",
+      toolName,
+      failureClass: "rate_limited",
+      detail: {
+        attemptsInWindow,
+        maxAttempts: WRITE_RATE_LIMIT_MAX_ATTEMPTS,
+        windowSeconds: WRITE_RATE_LIMIT_RETRY_SECONDS,
+      },
+      context,
+    });
+    return rateLimitedResult();
+  }
+
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "write_attempt",
+    toolName,
+    detail: {
+      attemptsInWindow: attemptsInWindow + 1,
+      maxAttempts: WRITE_RATE_LIMIT_MAX_ATTEMPTS,
+      windowSeconds: WRITE_RATE_LIMIT_RETRY_SECONDS,
+    },
+    context,
+  });
+
+  return null;
+}
+
+export const __testables = {
+  UUID_RE,
+  LEGACY_ID_RE,
+  NOTE_KEY_RE,
+  clampPositive,
+  sanitizeText,
+  sanitizeNoteKey,
+  isValidIsoDate,
+  resolveTimeZone,
+  isoDateInTimeZone,
+  addDaysToIsoDate,
+  normalizeDate,
+  buildWeightGoalProjection,
+  detectCoachingPatterns,
+  enforceWriteRateLimit,
+  hasRequiredScope,
+  hasExpectedAudience,
+  parseJwtClaims,
+  rateLimitedResult,
+};
+
 function parseBearer(authHeader?: string | null): string | null {
   if (!authHeader) return null;
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : null;
+}
+
+function parseJwtClaims(token: string): AccessTokenClaims | null {
+  const segments = token.split(".");
+  if (segments.length < 2) return null;
+
+  try {
+    const payload = JSON.parse(atob(segments[1].replace(/-/g, "+").replace(/_/g, "/")));
+    const rawAud = payload?.aud;
+    const rawScope = payload?.scope ?? payload?.scp;
+    const rawClientId = payload?.client_id;
+    const aud = Array.isArray(rawAud)
+      ? rawAud.map((value) => String(value).trim()).filter(Boolean)
+      : rawAud
+        ? [String(rawAud).trim()].filter(Boolean)
+        : [];
+    const scope = Array.isArray(rawScope)
+      ? rawScope.map((value) => String(value).trim()).filter(Boolean)
+      : typeof rawScope === "string"
+        ? rawScope.split(/\s+/).map((value) => value.trim()).filter(Boolean)
+        : [];
+
+    return {
+      aud,
+      scope,
+      clientId: rawClientId ? String(rawClientId).trim() : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function hasRequiredScope(identity: UserIdentity, requiredScope: string) {
+  const scopes = identity.tokenClaims?.scope ?? [];
+  if (!requiredScope || scopes.length === 0) {
+    return true;
+  }
+  return scopes.includes(requiredScope);
+}
+
+function hasExpectedAudience(identity: UserIdentity, expectedAudience?: string | null) {
+  if (!expectedAudience) return true;
+  const claims = identity.tokenClaims;
+  if (!claims) return false;
+  if (claims.aud.includes(expectedAudience)) return true;
+  if (claims.aud.includes(SUPABASE_DEFAULT_AUDIENCE)) return true;
+  return Boolean(claims.clientId);
 }
 
 async function resolveIdentity(context?: RequestContext): Promise<UserIdentity> {
@@ -200,175 +582,62 @@ async function resolveIdentity(context?: RequestContext): Promise<UserIdentity> 
   return {
     userId: data.user.id,
     authenticated: true,
+    tokenClaims: parseJwtClaims(token),
   };
 }
 
-function authRequiredResult(message = "Authentication required") {
+function authRequiredResult(
+  message = "Authentication required",
+  failureClass = "auth_required",
+) {
   return {
     success: false,
     authRequired: true,
     error: message,
+    failureClass,
   };
 }
 
-let schemaReadyCache: boolean | null = null;
+async function resolveAuthorizedIdentity(
+  context: RequestContext | undefined,
+  actionDescription: string,
+  requiredScope: string,
+): Promise<{ identity: UserIdentity; authErrorResult?: ReturnType<typeof authRequiredResult> }> {
+  const identity = await resolveIdentity(context);
 
-function isMissingRelationError(message: string) {
-  return message.includes("relation") && message.includes("does not exist");
-}
-
-async function isSchemaReady() {
-  if (schemaReadyCache != null) return schemaReadyCache;
-  try {
-    const supabase = dbClient();
-    const { error } = await supabase.from("nutrition_goals").select("user_id").limit(1);
-    if (error) {
-      if (isMissingRelationError(error.message)) {
-        schemaReadyCache = false;
-        return false;
-      }
-      throw new Error(error.message);
-    }
-    schemaReadyCache = true;
-    return true;
-  } catch {
-    schemaReadyCache = false;
-    return false;
+  if (!identity.authenticated) {
+    return {
+      identity,
+      authErrorResult: !ALLOW_DEMO_MODE
+        ? authRequiredResult(identity.authError ?? `Please authenticate before ${actionDescription}`)
+        : undefined,
+    };
   }
+
+  if (!hasRequiredScope(identity, requiredScope)) {
+    return {
+      identity,
+      authErrorResult: authRequiredResult(
+        `Missing required scope: ${requiredScope}`,
+        "insufficient_scope",
+      ),
+    };
+  }
+
+  if (!hasExpectedAudience(identity, context?.resource)) {
+    return {
+      identity,
+      authErrorResult: authRequiredResult(
+        "Token audience did not match this MCP resource",
+        "invalid_token",
+      ),
+    };
+  }
+
+  return { identity };
 }
 
-function legacyDefaultState(date: string): DailyState {
-  return {
-    date,
-    meals: [],
-    totalCalories: 0,
-    totalProtein: 0,
-    totalCarbs: 0,
-    totalFats: 0,
-    goals: {
-      calories: 2000,
-      protein: 150,
-      carbs: 200,
-      fats: 65,
-      goalWeight: 65,
-      startWeight: 76,
-      targetDate: null,
-    },
-    preferences: {
-      unitWeight: "kg",
-      unitEnergy: "kcal",
-      language: "en",
-      reminderEnabled: false,
-      reminderTime: "20:00",
-      themePreset: "midnight",
-      streakBadgeNotifications: true,
-      heightCm: 170,
-    },
-  };
-}
-
-function legacyStateFromRaw(raw: unknown, date: string): DailyState {
-  if (!raw || typeof raw !== "object") return legacyDefaultState(date);
-  const candidate = raw as Record<string, unknown>;
-  const goals = (candidate.goals ?? {}) as Record<string, unknown>;
-
-  return {
-    date: String(candidate.date ?? date),
-    meals: Array.isArray(candidate.meals)
-      ? candidate.meals.map((meal) => {
-          const row = meal as Record<string, unknown>;
-          return {
-            id: String(row.id ?? `meal_${Date.now()}`),
-            name: String(row.name ?? "Meal"),
-            calories: Number(row.calories ?? 0),
-            protein: Number(row.protein ?? 0),
-            carbs: Number(row.carbs ?? 0),
-            fats: Number(row.fats ?? 0),
-            timestamp: String(row.timestamp ?? new Date().toISOString()),
-          };
-        })
-      : [],
-    totalCalories: Number(candidate.totalCalories ?? 0),
-    totalProtein: Number(candidate.totalProtein ?? 0),
-    totalCarbs: Number(candidate.totalCarbs ?? 0),
-    totalFats: Number(candidate.totalFats ?? 0),
-    goals: {
-      calories: Number(goals.calories ?? 2000),
-      protein: Number(goals.protein ?? 150),
-      carbs: Number(goals.carbs ?? 200),
-      fats: Number(goals.fats ?? 65),
-      goalWeight: Number(goals.goalWeight ?? goals.goal_weight ?? 65),
-      startWeight: Number(goals.startWeight ?? goals.start_weight ?? 76),
-      targetDate: (goals.targetDate ?? goals.target_date ?? null) as string | null,
-    },
-    preferences: {
-      unitWeight: "kg",
-      unitEnergy: "kcal",
-      language: "en",
-      reminderEnabled: false,
-      reminderTime: "20:00",
-      themePreset: "midnight",
-      streakBadgeNotifications: true,
-      heightCm: 170,
-    },
-  };
-}
-
-async function legacyGetState(date: string) {
-  const raw = await kv.get(`daily_state:${date}`);
-  return legacyStateFromRaw(raw, date);
-}
-
-async function legacySaveState(state: DailyState) {
-  await kv.set(`daily_state:${state.date}`, state);
-}
-
-function legacyProgressFromState(state: DailyState, range = "90D") {
-  const currentWeight = Number(state.goals.startWeight ?? 76);
-  return {
-    range,
-    currentWeight,
-    startWeight: Number(state.goals.startWeight ?? 76),
-    goalWeight: Number(state.goals.goalWeight ?? 65),
-    targetDate: state.goals.targetDate ?? null,
-    weightSeries: [{ date: state.date, weight: currentWeight }],
-    weightChanges: [
-      { label: "3 day", delta: 0, trend: "No change" },
-      { label: "7 day", delta: 0, trend: "No change" },
-      { label: "14 day", delta: 0, trend: "No change" },
-      { label: "30 day", delta: 0, trend: "No change" },
-      { label: "90 day", delta: 0, trend: "No change" },
-      { label: "All Time", delta: 0, trend: "No change" },
-    ],
-    calorieSeries: [
-      {
-        date: state.date,
-        calories: state.totalCalories,
-        protein: state.totalProtein,
-        carbs: state.totalCarbs,
-        fats: state.totalFats,
-        meals: state.meals.length,
-      },
-    ],
-    dailyAverageCalories: state.totalCalories,
-    weeklyEnergy: {
-      burned: Math.round(state.goals.calories * 0.6),
-      consumed: state.totalCalories,
-      energy: state.totalCalories - Math.round(state.goals.calories * 0.6),
-      daily: [],
-    },
-    bmi: {
-      value: 0,
-      status: "Unknown",
-    },
-    streak: {
-      current: state.meals.length > 0 ? 1 : 0,
-      week: [],
-    },
-    badges: state.meals.length >= 3 ? ["three_meals_day"] : [],
-    photos: [],
-  };
-}
+// --- DB helpers ---
 
 async function ensureGoals(supabase: DbClient, userId: string) {
   const { data, error } = await supabase
@@ -432,6 +701,440 @@ async function ensurePreferences(supabase: DbClient, userId: string) {
   }
 
   return created;
+}
+
+function mapAgentNote(row: Record<string, unknown>): AgentNote {
+  return {
+    key: String(row.note_key ?? ""),
+    value: String(row.note_value ?? ""),
+    updatedAt: String(row.updated_at ?? new Date().toISOString()),
+  };
+}
+
+async function fetchAgentNotes(
+  supabase: DbClient,
+  userId: string,
+  orderBy: "note_key" | "updated_at" = "updated_at",
+  ascending = false,
+) {
+  const { data, error } = await supabase
+    .from("agent_notes")
+    .select("note_key, note_value, updated_at")
+    .eq("user_id", userId)
+    .order(orderBy, { ascending });
+
+  if (error) {
+    throw new Error(`Failed to fetch agent notes: ${error.message}`);
+  }
+
+  return (data ?? []).map((row) => mapAgentNote(row as Record<string, unknown>));
+}
+
+async function fetchRecentMealCount(supabase: DbClient, userId: string, timeZone?: string | null) {
+  const startDate = rangeStart("30D", timeZone);
+  const { data, error } = await supabase
+    .from("meals")
+    .select("meal_name")
+    .eq("user_id", userId)
+    .gte("logged_date", startDate);
+
+  if (error) {
+    throw new Error(`Failed to fetch recent meals: ${error.message}`);
+  }
+
+  return new Set((data ?? []).map((row) => String((row as Record<string, unknown>).meal_name ?? ""))).size;
+}
+
+async function fetchWeightEntryCount(supabase: DbClient, userId: string) {
+  const { data, error } = await supabase
+    .from("weight_entries")
+    .select("entry_date")
+    .eq("user_id", userId);
+
+  if (error) {
+    throw new Error(`Failed to fetch weight entries: ${error.message}`);
+  }
+
+  return (data ?? []).length;
+}
+
+function buildOnboardingGuide(params: {
+  recentMealCount: number;
+  weightEntryCount: number;
+  agentNoteCount: number;
+}): OnboardingGuide {
+  const isNewUser = params.recentMealCount === 0 && params.weightEntryCount === 0;
+
+  return {
+    isNewUser,
+    summary: isNewUser
+      ? "Ask CalGPT in chat to log a first meal, log a first weight, or show your dashboard."
+      : "Ask CalGPT in chat to log meals, log weight, update goals, or run a coaching review.",
+    suggestedPrompt: isNewUser
+      ? STARTER_PROMPTS[1]
+      : params.agentNoteCount > 0
+        ? "Show my dashboard and keep my saved preferences in mind."
+        : "Show my dashboard and summarize my progress.",
+    starterPrompts: STARTER_PROMPTS,
+  };
+}
+
+async function fetchRecentMeals(
+  supabase: DbClient,
+  userId: string,
+  limit = 20,
+): Promise<RecentMealSummary[]> {
+  const { data, error } = await supabase
+    .from("meals")
+    .select("meal_name, calories, protein, carbs, fats, consumed_at")
+    .eq("user_id", userId)
+    .order("consumed_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch recent meals: ${error.message}`);
+  }
+
+  const grouped = new Map<
+    string,
+    {
+      name: string;
+      frequency: number;
+      lastLoggedAt: string;
+      calories: number;
+      protein: number;
+      carbs: number;
+      fats: number;
+    }
+  >();
+
+  for (const row of data ?? []) {
+    const record = row as Record<string, unknown>;
+    const name = String(record.meal_name ?? "").trim();
+    if (!name) continue;
+
+    const existing = grouped.get(name);
+    if (existing) {
+      existing.frequency += 1;
+      existing.calories += Number(record.calories ?? 0);
+      existing.protein += Number(record.protein ?? 0);
+      existing.carbs += Number(record.carbs ?? 0);
+      existing.fats += Number(record.fats ?? 0);
+      const consumedAt = String(record.consumed_at ?? existing.lastLoggedAt);
+      if (consumedAt > existing.lastLoggedAt) {
+        existing.lastLoggedAt = consumedAt;
+      }
+      continue;
+    }
+
+    grouped.set(name, {
+      name,
+      frequency: 1,
+      lastLoggedAt: String(record.consumed_at ?? new Date().toISOString()),
+      calories: Number(record.calories ?? 0),
+      protein: Number(record.protein ?? 0),
+      carbs: Number(record.carbs ?? 0),
+      fats: Number(record.fats ?? 0),
+    });
+  }
+
+  return Array.from(grouped.values())
+    .sort((left, right) => {
+      if (right.frequency !== left.frequency) {
+        return right.frequency - left.frequency;
+      }
+      return right.lastLoggedAt.localeCompare(left.lastLoggedAt);
+    })
+    .slice(0, Math.max(0, Math.trunc(limit)))
+    .map((meal) => ({
+      name: meal.name,
+      frequency: meal.frequency,
+      lastLoggedAt: meal.lastLoggedAt,
+      avgCalories: round(meal.calories / meal.frequency, 0),
+      avgProtein: round(meal.protein / meal.frequency, 1),
+      avgCarbs: round(meal.carbs / meal.frequency, 1),
+      avgFats: round(meal.fats / meal.frequency, 1),
+    }));
+}
+
+function isVegetarianPreference(agentNotes: AgentNote[]) {
+  return agentNotes.some((note) => {
+    const text = noteText(note);
+    return text.includes("vegetarian") || text.includes("vegan");
+  });
+}
+
+async function fetchRecentDailyTotals(
+  supabase: DbClient,
+  userId: string,
+  timeZone?: string | null,
+  days = 7,
+): Promise<DailyTotalSnapshot[]> {
+  const today = todayIsoDate(timeZone);
+  const startDate = addDaysToIsoDate(today, -(days - 1));
+  const { data, error } = await supabase
+    .from("daily_totals")
+    .select("entry_date, total_calories, total_protein, total_carbs, total_fats, meal_count")
+    .eq("user_id", userId)
+    .gte("entry_date", startDate)
+    .lte("entry_date", today)
+    .order("entry_date", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to fetch recent daily totals: ${error.message}`);
+  }
+
+  const byDate = new Map(
+    (data ?? []).map((row) => [
+      String((row as Record<string, unknown>).entry_date ?? ""),
+      {
+        date: String((row as Record<string, unknown>).entry_date ?? ""),
+        calories: Number((row as Record<string, unknown>).total_calories ?? 0),
+        protein: Number((row as Record<string, unknown>).total_protein ?? 0),
+        carbs: Number((row as Record<string, unknown>).total_carbs ?? 0),
+        fats: Number((row as Record<string, unknown>).total_fats ?? 0),
+        meals: Number((row as Record<string, unknown>).meal_count ?? 0),
+      },
+    ]),
+  );
+
+  return Array.from({ length: days }).map((_, index) => {
+    const iso = addDaysToIsoDate(startDate, index);
+    return byDate.get(iso) ?? { date: iso, calories: 0, protein: 0, carbs: 0, fats: 0, meals: 0 };
+  });
+}
+
+async function fetchRecentMealPatterns(
+  supabase: DbClient,
+  userId: string,
+  timeZone?: string | null,
+  days = 7,
+): Promise<RecentMealPatternSnapshot[]> {
+  const today = todayIsoDate(timeZone);
+  const startDate = addDaysToIsoDate(today, -(days - 1));
+  const { data, error } = await supabase
+    .from("meals")
+    .select("logged_date, consumed_at")
+    .eq("user_id", userId)
+    .gte("logged_date", startDate)
+    .lte("logged_date", today)
+    .order("consumed_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch recent meal patterns: ${error.message}`);
+  }
+
+  return (data ?? []).map((row) => ({
+    loggedDate: String((row as Record<string, unknown>).logged_date ?? ""),
+    consumedAt: String((row as Record<string, unknown>).consumed_at ?? ""),
+  }));
+}
+
+function hourInTimeZone(timestamp: string, timeZone: string) {
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const hour = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    hourCycle: "h23",
+  })
+    .formatToParts(parsed)
+    .find((part) => part.type === "hour")?.value;
+  return hour ? Number(hour) : null;
+}
+
+function joinLabels(labels: string[]) {
+  if (labels.length <= 1) return labels.join("");
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}`;
+}
+
+function buildWeightGoalProjection(
+  weightSeries: WeightPoint[],
+  goals: DailyState["goals"],
+): GoalProjection | null {
+  const goalWeight = goals.goalWeight;
+  if (goalWeight == null || weightSeries.length < 2) {
+    return null;
+  }
+
+  const latest = weightSeries.at(-1);
+  if (!latest) {
+    return null;
+  }
+
+  const recentWindow = weightSeries.slice(-30);
+  const baseline = recentWindow[0];
+  if (!baseline || baseline.date === latest.date) {
+    return null;
+  }
+
+  const elapsedDays = Math.max(1, Math.round(
+    (new Date(`${latest.date}T12:00:00.000Z`).getTime() - new Date(`${baseline.date}T12:00:00.000Z`).getTime()) /
+      86400000,
+  ));
+  const delta = latest.weight - baseline.weight;
+  const direction: GoalProjection["direction"] = goalWeight < latest.weight ? "loss" : "gain";
+  const ratePerDay = delta / elapsedDays;
+  const movingTowardGoal =
+    (direction === "loss" && ratePerDay < -0.01) ||
+    (direction === "gain" && ratePerDay > 0.01);
+
+  if (!movingTowardGoal) {
+    return null;
+  }
+
+  const remaining = Math.abs(goalWeight - latest.weight);
+  const daysToGoal = Math.round(remaining / Math.abs(ratePerDay));
+  if (!Number.isFinite(daysToGoal) || daysToGoal <= 0 || daysToGoal > 730) {
+    return null;
+  }
+
+  return {
+    direction,
+    weeklyRate: round(Math.abs(ratePerDay) * 7, 2),
+    daysToGoal,
+    projectedDate: addDaysToIsoDate(latest.date, daysToGoal),
+  };
+}
+
+function detectCoachingPatterns(args: {
+  goals: DailyState["goals"],
+  recentDays: DailyTotalSnapshot[];
+  recentMeals: RecentMealPatternSnapshot[];
+  weightSeries: WeightPoint[];
+  streakCurrent: number;
+  timeZone: string;
+}) {
+  const { goals, recentDays, recentMeals, weightSeries, streakCurrent, timeZone } = args;
+  const patterns: CoachingPattern[] = [];
+  const proteinShortDays =
+    goals.protein > 0 ? recentDays.filter((day) => day.protein < goals.protein * 0.7) : [];
+  const skippedDays = recentDays.filter((day) => day.meals === 0);
+  const overeatingDays =
+    goals.calories > 0 ? recentDays.filter((day) => day.calories > goals.calories * 1.1) : [];
+  const lateNightMeals = recentMeals.filter((meal) => {
+    const localHour = hourInTimeZone(meal.consumedAt, timeZone);
+    return localHour != null && localHour >= 21;
+  });
+
+  if (proteinShortDays.length >= 4) {
+    patterns.push({
+      code: "protein_deficit",
+      severity: "warning",
+      message: `Protein stayed below 70% of your ${goals.protein}g target on ${proteinShortDays.length} of the last 7 days.`,
+      action: "Add a repeatable protein anchor such as yogurt, eggs, tofu, or a shake earlier in the day.",
+    });
+  }
+
+  if (overeatingDays.length >= 3) {
+    const averageOverage = round(
+      average(overeatingDays.map((day) => day.calories - goals.calories)),
+      0,
+    );
+    patterns.push({
+      code: "calorie_overconsumption",
+      severity: "warning",
+      message: `Calories were above 110% of target on ${overeatingDays.length} of the last 7 days, by an average of ${averageOverage} calories.`,
+      action: "Tighten one high-calorie meal this week instead of trying to cut every meal at once.",
+    });
+  }
+
+  if (skippedDays.length > 0) {
+    const skippedLabels = skippedDays.map((day) => weekdayLabel(day.date, timeZone));
+    patterns.push({
+      code: "skipped_meals",
+      severity: "warning",
+      message: `You skipped logging meals on ${joinLabels(skippedLabels)}, which can make trends noisier.`,
+      action: "Set up one default meal or meal-prep fallback so low-structure days still get logged.",
+    });
+  }
+
+  if (lateNightMeals.length >= 2) {
+    patterns.push({
+      code: "late_night_eating",
+      severity: "warning",
+      message: `${lateNightMeals.length} meals were logged after 21:00 in the last 7 days, which can make sleep and digestion harder to manage.`,
+      action: "Front-load more calories earlier in the day and keep a lighter late option ready if evenings run long.",
+    });
+  }
+
+  const macroPatterns = ([
+    { key: "protein", label: "Protein" },
+    { key: "carbs", label: "Carbs" },
+    { key: "fats", label: "Fats" },
+  ] as const)
+    .map((macro) => ({
+      ...macro,
+      goal: goals[macro.key],
+      count:
+        goals[macro.key] > 0
+          ? recentDays.filter((day) => day[macro.key] > goals[macro.key] * 1.5).length
+          : 0,
+    }))
+    .sort((left, right) => right.count - left.count);
+
+  const dominantMacro = macroPatterns[0];
+  if (dominantMacro && dominantMacro.goal > 0 && dominantMacro.count >= 3) {
+    patterns.push({
+      code: "macro_imbalance",
+      severity: "warning",
+      message: `${dominantMacro.label} exceeded 150% of goal on ${dominantMacro.count} of the last 7 days.`,
+      action: `Rebalance around your ${dominantMacro.label.toLowerCase()} target by pairing that macro with leaner meals for the next few days.`,
+    });
+  }
+
+  const recentWeightWindow = weightSeries.filter((point) => {
+    const start = addDaysToIsoDate(todayIsoDate(timeZone), -13);
+    return point.date >= start;
+  });
+
+  if (recentWeightWindow.length >= 14) {
+    const weights = recentWeightWindow.map((point) => point.weight);
+    const variance = round(Math.max(...weights) - Math.min(...weights), 2);
+    if (variance < 0.2) {
+      patterns.push({
+        code: "weight_plateau",
+        severity: "warning",
+        message: `Weight stayed within a ${variance} range over the last 14 days, which looks like a plateau.`,
+        action: "Consider a small calorie adjustment or an activity bump if this plateau is not intentional.",
+      });
+    }
+  }
+
+  const projection = buildWeightGoalProjection(weightSeries, goals);
+  if (projection) {
+    patterns.push({
+      code: "weight_goal_projection",
+      severity: "positive",
+      message: `At your current ${projection.direction} rate of ${projection.weeklyRate} per week, you would reach goal around ${projection.projectedDate}.`,
+      action: "Keep the current logging consistency so the projection stays reliable.",
+    });
+  }
+
+  const milestone = [365, 180, 90, 60, 30, 14, 7].find((value) => value === streakCurrent);
+  if (milestone) {
+    patterns.push({
+      code: "streak_milestone",
+      severity: "positive",
+      message: `You hit a ${milestone}-day logging streak milestone.`,
+      action: "Protect the streak with one simple log tomorrow, even if the day is imperfect.",
+      badgeCode: `streak_${milestone}`,
+    });
+  }
+
+  return patterns;
+}
+
+function buildCheckinPatternObservations(patterns: CoachingPattern[]) {
+  return patterns
+    .filter((pattern) =>
+      pattern.code === "protein_deficit" ||
+      pattern.code === "calorie_overconsumption" ||
+      pattern.code === "skipped_meals" ||
+      pattern.code === "late_night_eating" ||
+      pattern.code === "macro_imbalance",
+    )
+    .map((pattern) => pattern.message);
 }
 
 async function recalcDailyTotals(supabase: DbClient, userId: string, date: string) {
@@ -505,99 +1208,25 @@ async function recalcDailyTotals(supabase: DbClient, userId: string, date: strin
   return totals;
 }
 
-async function backfillFromLegacyKv(supabase: DbClient, userId: string, date: string) {
-  const { data: existing, error } = await supabase
-    .from("daily_totals")
-    .select("meal_count")
-    .eq("user_id", userId)
-    .eq("entry_date", date)
-    .limit(1)
-    .maybeSingle();
+// --- State builders ---
 
-  if (error) {
-    throw new Error(`Failed to check backfill state: ${error.message}`);
-  }
-
-  if (existing) return;
-
-  const legacy = await kv.get(`daily_state:${date}`);
-  if (!legacy || typeof legacy !== "object") return;
-
-  const legacyMeals = Array.isArray((legacy as { meals?: unknown[] }).meals)
-    ? ((legacy as { meals: Array<Record<string, unknown>> }).meals ?? [])
-    : [];
-
-  if (legacyMeals.length > 0) {
-    const payload = legacyMeals.map((meal) => ({
-      user_id: userId,
-      legacy_meal_id: String(meal.id ?? ""),
-      meal_name: String(meal.name ?? "Meal"),
-      calories: Number(meal.calories ?? 0),
-      protein: Number(meal.protein ?? 0),
-      carbs: Number(meal.carbs ?? 0),
-      fats: Number(meal.fats ?? 0),
-      logged_date: date,
-      consumed_at: typeof meal.timestamp === "string" ? meal.timestamp : `${date}T12:00:00.000Z`,
-    }));
-
-    const { error: mealInsertError } = await supabase.from("meals").insert(payload);
-    if (mealInsertError) {
-      throw new Error(`Failed to backfill meals: ${mealInsertError.message}`);
-    }
-  }
-
-  const legacyGoals = (legacy as { goals?: Record<string, number> }).goals;
-  if (legacyGoals && typeof legacyGoals === "object") {
-    const { error: goalError } = await supabase.from("nutrition_goals").upsert(
-      {
-        user_id: userId,
-        calories: Number(legacyGoals.calories ?? DEFAULT_GOALS.calories),
-        protein: Number(legacyGoals.protein ?? DEFAULT_GOALS.protein),
-        carbs: Number(legacyGoals.carbs ?? DEFAULT_GOALS.carbs),
-        fats: Number(legacyGoals.fats ?? DEFAULT_GOALS.fats),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" },
-    );
-
-    if (goalError) {
-      throw new Error(`Failed to backfill goals: ${goalError.message}`);
-    }
-  }
-
-  await recalcDailyTotals(supabase, userId, date);
-}
-
-async function buildDailyState(supabase: DbClient, userId: string, date: string): Promise<DailyState> {
-  await ensureGoals(supabase, userId);
-  await ensurePreferences(supabase, userId);
-
-  await backfillFromLegacyKv(supabase, userId, date);
-
-  const [{ data: goals, error: goalsError }, { data: preferences, error: prefError }] =
-    await Promise.all([
-      supabase
-        .from("nutrition_goals")
-        .select("*")
-        .eq("user_id", userId)
-        .limit(1)
-        .maybeSingle(),
-      supabase
-        .from("user_preferences")
-        .select("*")
-        .eq("user_id", userId)
-        .limit(1)
-        .maybeSingle(),
-    ]);
-
-  if (goalsError) throw new Error(`Failed to fetch goals: ${goalsError.message}`);
-  if (prefError) throw new Error(`Failed to fetch preferences: ${prefError.message}`);
-  if (!goals) throw new Error("Failed to fetch goals: no row found for user");
-  if (!preferences) throw new Error("Failed to fetch preferences: no row found for user");
+async function buildDailyState(
+  supabase: DbClient,
+  userId: string,
+  date: string,
+  timeZone?: string | null,
+): Promise<DailyState> {
+  const [goals, preferences, agentNotes, recentMealCount, weightEntryCount] = await Promise.all([
+    ensureGoals(supabase, userId),
+    ensurePreferences(supabase, userId),
+    fetchAgentNotes(supabase, userId, "note_key", true),
+    fetchRecentMealCount(supabase, userId, timeZone),
+    fetchWeightEntryCount(supabase, userId),
+  ]);
 
   const { data: meals, error: mealsError } = await supabase
     .from("meals")
-    .select("id, legacy_meal_id, meal_name, calories, protein, carbs, fats, consumed_at")
+    .select("id, legacy_meal_id, meal_name, calories, protein, carbs, fats, estimation_notes, consumed_at")
     .eq("user_id", userId)
     .eq("logged_date", date)
     .order("consumed_at", { ascending: false });
@@ -632,7 +1261,14 @@ async function buildDailyState(supabase: DbClient, userId: string, date: string)
       carbs: Number(meal.carbs ?? 0),
       fats: Number(meal.fats ?? 0),
       timestamp: String(meal.consumed_at ?? `${date}T12:00:00.000Z`),
+      estimationNotes: meal.estimation_notes ? String(meal.estimation_notes) : null,
     })),
+    agentNotes,
+    onboarding: buildOnboardingGuide({
+      recentMealCount,
+      weightEntryCount,
+      agentNoteCount: agentNotes.length,
+    }),
     totalCalories: totals.calories,
     totalProtein: totals.protein,
     totalCarbs: totals.carbs,
@@ -673,6 +1309,10 @@ function average(values: number[]) {
 function round(value: number, decimals = 1) {
   const pow = 10 ** decimals;
   return Math.round(value * pow) / pow;
+}
+
+function noteText(note: AgentNote) {
+  return `${note.key} ${note.value}`.toLowerCase();
 }
 
 function weightChangeSummary(weightSeries: WeightPoint[], timeZone?: string | null) {
@@ -731,8 +1371,8 @@ async function buildProgress(
   const [
     { data: weights, error: weightsError },
     { data: totals, error: totalsError },
-    { data: goals, error: goalsError },
-    { data: preferences, error: prefsError },
+    goals,
+    preferences,
     { data: badges, error: badgesError },
     { data: photos, error: photosError },
   ] = await Promise.all([
@@ -749,18 +1389,8 @@ async function buildProgress(
       .gte("entry_date", startDate)
       .lte("entry_date", today)
       .order("entry_date", { ascending: true }),
-    supabase
-      .from("nutrition_goals")
-      .select("*")
-      .eq("user_id", userId)
-      .limit(1)
-      .maybeSingle(),
-    supabase
-      .from("user_preferences")
-      .select("*")
-      .eq("user_id", userId)
-      .limit(1)
-      .maybeSingle(),
+    ensureGoals(supabase, userId),
+    ensurePreferences(supabase, userId),
     supabase
       .from("badge_events")
       .select("badge_code, awarded_at")
@@ -776,10 +1406,6 @@ async function buildProgress(
 
   if (weightsError) throw new Error(`Failed to fetch weights: ${weightsError.message}`);
   if (totalsError) throw new Error(`Failed to fetch totals: ${totalsError.message}`);
-  if (goalsError) throw new Error(`Failed to fetch goals for progress: ${goalsError.message}`);
-  if (prefsError) throw new Error(`Failed to fetch preferences for progress: ${prefsError.message}`);
-  if (!goals) throw new Error("Failed to fetch goals for progress: no row found for user");
-  if (!preferences) throw new Error("Failed to fetch preferences for progress: no row found for user");
   if (badgesError) throw new Error(`Failed to fetch badges: ${badgesError.message}`);
   if (photosError) throw new Error(`Failed to fetch photos: ${photosError.message}`);
 
@@ -800,31 +1426,25 @@ async function buildProgress(
   const weeklyPoints = Array.from({ length: 7 }).map((_, i) => {
     const iso = addDaysToIsoDate(today, -(6 - i));
     const dayData = calorieSeries.find((entry) => entry.date === iso);
-    const consumed = Number(dayData?.calories ?? 0);
-    const burned = Math.max(0, Math.round(Number(goals.calories ?? 2000) * 0.6));
     return {
       day: weekdayLabel(iso, resolvedTimeZone),
-      consumed,
-      burned,
+      consumed: Number(dayData?.calories ?? 0),
     };
   });
 
   const weeklyConsumed = weeklyPoints.reduce((acc, point) => acc + point.consumed, 0);
-  const weeklyBurned = weeklyPoints.reduce((acc, point) => acc + point.burned, 0);
 
   const lastWeight = weightSeries.at(-1)?.weight ?? Number(goals.start_weight ?? 0);
   const heightMeters = Number(preferences.height_cm ?? 170) / 100;
   const bmi = heightMeters > 0 ? round(lastWeight / (heightMeters * heightMeters), 1) : 0;
 
-  const streakBase = [...calorieSeries]
-    .filter((entry) => entry.meals > 0)
-    .map((entry) => entry.date)
-    .sort();
+  const streakSet = new Set(
+    calorieSeries.filter((entry) => entry.meals > 0).map((entry) => entry.date),
+  );
 
   let streakCurrent = 0;
   let cursorIso = today;
-  while (true) {
-    if (!streakBase.includes(cursorIso)) break;
+  while (streakSet.has(cursorIso)) {
     streakCurrent += 1;
     cursorIso = addDaysToIsoDate(cursorIso, -1);
   }
@@ -833,6 +1453,13 @@ async function buildProgress(
     streakCurrent >= 7 ? "week_streak" : null,
     streakCurrent >= 30 ? "month_streak" : null,
     weightSeries.length >= 10 ? "consistent_logger" : null,
+    streakCurrent >= 7 ? "streak_7" : null,
+    streakCurrent >= 14 ? "streak_14" : null,
+    streakCurrent >= 30 ? "streak_30" : null,
+    streakCurrent >= 60 ? "streak_60" : null,
+    streakCurrent >= 90 ? "streak_90" : null,
+    streakCurrent >= 180 ? "streak_180" : null,
+    streakCurrent >= 365 ? "streak_365" : null,
   ].filter(Boolean) as string[];
 
   const badgeList = Array.from(
@@ -852,9 +1479,7 @@ async function buildProgress(
     calorieSeries,
     dailyAverageCalories: round(average(calorieSeries.map((entry) => entry.calories)), 0),
     weeklyEnergy: {
-      burned: weeklyBurned,
       consumed: weeklyConsumed,
-      energy: weeklyConsumed - weeklyBurned,
       daily: weeklyPoints,
     },
     bmi: {
@@ -867,7 +1492,7 @@ async function buildProgress(
         const iso = addDaysToIsoDate(today, -(6 - i));
         return {
           day: weekdayLabel(iso, resolvedTimeZone).slice(0, 1),
-          hit: streakBase.includes(iso),
+          hit: streakSet.has(iso),
         };
       }),
     },
@@ -888,14 +1513,15 @@ async function fetchStateAndProgress(
 ) {
   const supabase = dbClient();
   const [state, progress] = await Promise.all([
-    buildDailyState(supabase, userId, date),
+    buildDailyState(supabase, userId, date, timeZone),
     buildProgress(supabase, userId, range, timeZone),
   ]);
 
   return { state, progress };
 }
 
-// V1 tool: log_meal
+// --- Tool handlers ---
+
 export async function logMeal(
   params: {
     name: string;
@@ -903,163 +1529,181 @@ export async function logMeal(
     protein?: number;
     carbs?: number;
     fats?: number;
+    estimation_notes?: string;
     date?: string;
   },
   context?: RequestContext,
 ) {
-  const { name, calories, protein = 0, carbs = 0, fats = 0 } = params;
-  if (!name || Number.isNaN(Number(calories))) {
-    return { success: false, error: "name and calories are required" };
+  const name = sanitizeText(params.name, 200);
+  const calories = clampPositive(params.calories, 0, 50000);
+  const protein = clampPositive(params.protein, 0, 5000);
+  const carbs = clampPositive(params.carbs, 0, 5000);
+  const fats = clampPositive(params.fats, 0, 5000);
+  const estimationNotes = params.estimation_notes
+    ? sanitizeText(params.estimation_notes, 500).trim()
+    : null;
+
+  if (!name) {
+    return { success: false, error: "name and calories are required", failureClass: "validation_error" };
   }
 
-  const identity = await resolveIdentity(context);
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "logging meals", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const loggedDate = normalizeDate(params.date, context?.timeZone);
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(loggedDate);
-    state.meals.push({
-      id: `meal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      name: String(name),
-      calories: Number(calories) || 0,
-      protein: Number(protein) || 0,
-      carbs: Number(carbs) || 0,
-      fats: Number(fats) || 0,
-      timestamp: new Date().toISOString(),
-    });
-    state.totalCalories = state.meals.reduce((acc, meal) => acc + meal.calories, 0);
-    state.totalProtein = state.meals.reduce((acc, meal) => acc + meal.protein, 0);
-    state.totalCarbs = state.meals.reduce((acc, meal) => acc + meal.carbs, 0);
-    state.totalFats = state.meals.reduce((acc, meal) => acc + meal.fats, 0);
-    await legacySaveState(state);
-    return {
-      success: true,
-      state,
-      mode: identity.authenticated ? "authenticated" : "demo",
-      message: `Logged ${name}. Total today: ${state.totalCalories}/${state.goals.calories} calories.`,
-    };
-  }
-
   const userId = identity.userId;
   const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "log_meal", context);
+  if (rateLimitResult) return rateLimitResult;
 
   await ensureGoals(supabase, userId);
   await ensurePreferences(supabase, userId);
 
   const { error: insertError } = await supabase.from("meals").insert({
     user_id: userId,
-    meal_name: String(name),
-    calories: Number(calories) || 0,
-    protein: Number(protein) || 0,
-    carbs: Number(carbs) || 0,
-    fats: Number(fats) || 0,
+    meal_name: name,
+    calories,
+    protein,
+    carbs,
+    fats,
+    estimation_notes: estimationNotes,
     logged_date: loggedDate,
     consumed_at: new Date().toISOString(),
   });
 
   if (insertError) {
-    return { success: false, error: insertError.message };
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "tool_error",
+      toolName: "log_meal",
+      failureClass: "db_error",
+      detail: { reason: insertError.message, loggedDate },
+      context,
+    });
+    return { success: false, error: insertError.message, failureClass: "db_error" };
   }
 
   await recalcDailyTotals(supabase, userId, loggedDate);
 
-  const state = await buildDailyState(supabase, userId, loggedDate);
+  const state = await buildDailyState(supabase, userId, loggedDate, context?.timeZone);
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "meal_logged",
+    toolName: "log_meal",
+    detail: {
+      loggedDate,
+      calories,
+      protein,
+      carbs,
+      fats,
+      hasEstimate: Boolean(estimationNotes),
+    },
+    context,
+  });
 
   return {
     success: true,
     state,
     mode: identity.authenticated ? "authenticated" : "demo",
-    message: `Logged ${name}. Total today: ${state.totalCalories}/${state.goals.calories} calories.`,
+    message: `Logged ${name}. ${summarizeDailyCalories(state)}`,
   };
 }
 
-// V1 tool: sync_state
 export async function syncState(
   params: { date?: string; range?: string; page?: string } = {},
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "loading your dashboard", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const date = normalizeDate(params.date, context?.timeZone);
   const range = String(params.range ?? "90D").toUpperCase();
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(date);
-    const progress = legacyProgressFromState(state, range);
-    return {
-      success: true,
-      state,
-      progress,
-      mode: identity.authenticated ? "authenticated" : "demo",
-      page: params.page ?? "home",
-    };
-  }
-
   const userId = identity.userId;
 
   const { state, progress } = await fetchStateAndProgress(userId, date, range, context?.timeZone);
+  const page = String(params.page ?? "home");
+  if (page === "home") {
+    const supabase = dbClient();
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "dashboard_open",
+      toolName: "sync_state",
+      page,
+      detail: {
+        date,
+        range,
+        isNewUser: state.onboarding.isNewUser,
+        mealsLoggedToday: state.meals.length,
+        weightEntriesInRange: progress.weightSeries.length,
+      },
+      context,
+    });
+  }
 
   return {
     success: true,
     state,
     progress,
     mode: identity.authenticated ? "authenticated" : "demo",
-    page: params.page ?? "home",
+    page,
   };
 }
 
-// V1 tool: delete_meal
 export async function deleteMeal(params: { meal_id: string; date?: string }, context?: RequestContext) {
   if (!params.meal_id) {
-    return { success: false, error: "meal_id is required" };
+    return { success: false, error: "meal_id is required", failureClass: "validation_error" };
   }
 
-  const identity = await resolveIdentity(context);
+  const mealId = String(params.meal_id);
+  if (!UUID_RE.test(mealId) && !LEGACY_ID_RE.test(mealId)) {
+    return { success: false, error: "Invalid meal_id format", failureClass: "validation_error" };
+  }
+
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "deleting meals", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const date = normalizeDate(params.date, context?.timeZone);
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(date);
-    const nextMeals = state.meals.filter((meal) => meal.id !== params.meal_id);
-    if (nextMeals.length === state.meals.length) {
-      return { success: false, error: "Meal not found" };
-    }
-    state.meals = nextMeals;
-    state.totalCalories = state.meals.reduce((acc, meal) => acc + meal.calories, 0);
-    state.totalProtein = state.meals.reduce((acc, meal) => acc + meal.protein, 0);
-    state.totalCarbs = state.meals.reduce((acc, meal) => acc + meal.carbs, 0);
-    state.totalFats = state.meals.reduce((acc, meal) => acc + meal.fats, 0);
-    await legacySaveState(state);
-    return {
-      success: true,
-      state,
-      mode: identity.authenticated ? "authenticated" : "demo",
-      message: "Meal deleted",
-    };
-  }
-
   const userId = identity.userId;
   const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "delete_meal", context);
+  if (rateLimitResult) return rateLimitResult;
+  const { data: mealBeforeDelete } = await supabase
+    .from("meals")
+    .select("meal_name, calories")
+    .eq("user_id", userId)
+    .or(`id.eq.${mealId},legacy_meal_id.eq.${mealId}`)
+    .maybeSingle();
 
   const { error } = await supabase
     .from("meals")
     .delete()
     .eq("user_id", userId)
-    .or(`id.eq.${params.meal_id},legacy_meal_id.eq.${params.meal_id}`);
+    .or(`id.eq.${mealId},legacy_meal_id.eq.${mealId}`);
 
   if (error) {
-    return { success: false, error: error.message };
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "tool_error",
+      toolName: "delete_meal",
+      failureClass: "db_error",
+      detail: { reason: error.message, mealId, date },
+      context,
+    });
+    return { success: false, error: error.message, failureClass: "db_error" };
   }
 
   await recalcDailyTotals(supabase, userId, date);
-  const state = await buildDailyState(supabase, userId, date);
+  const state = await buildDailyState(supabase, userId, date, context?.timeZone);
+  const deletedMealName = mealBeforeDelete?.meal_name ? String(mealBeforeDelete.meal_name) : null;
 
   return {
     success: true,
     state,
+    deletedMealName,
     mode: identity.authenticated ? "authenticated" : "demo",
-    message: "Meal deleted",
+    message: deletedMealName
+      ? `Deleted ${deletedMealName}. ${summarizeDailyCalories(state)}`
+      : `Meal deleted. ${summarizeDailyCalories(state)}`,
   };
 }
 
-// V1+V2 tool: update_goals
 export async function updateGoals(
   params: {
     calories?: number;
@@ -1073,47 +1717,31 @@ export async function updateGoals(
   },
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "updating goals", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const date = normalizeDate(params.date, context?.timeZone);
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(date);
-    if (params.calories != null) state.goals.calories = Number(params.calories);
-    if (params.protein != null) state.goals.protein = Number(params.protein);
-    if (params.carbs != null) state.goals.carbs = Number(params.carbs);
-    if (params.fats != null) state.goals.fats = Number(params.fats);
-    if (params.goal_weight != null) state.goals.goalWeight = Number(params.goal_weight);
-    if (params.start_weight != null) state.goals.startWeight = Number(params.start_weight);
-    if (params.target_date != null) state.goals.targetDate = String(params.target_date);
-    await legacySaveState(state);
-    return {
-      success: true,
-      state,
-      mode: identity.authenticated ? "authenticated" : "demo",
-      message: "Goals updated",
-    };
-  }
-
   const userId = identity.userId;
   const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "update_goals", context);
+  if (rateLimitResult) return rateLimitResult;
 
   const existing = await ensureGoals(supabase, userId);
 
   const patch = {
     user_id: userId,
-    calories: params.calories != null ? Number(params.calories) : Number(existing.calories),
-    protein: params.protein != null ? Number(params.protein) : Number(existing.protein),
-    carbs: params.carbs != null ? Number(params.carbs) : Number(existing.carbs),
-    fats: params.fats != null ? Number(params.fats) : Number(existing.fats),
+    calories: params.calories != null ? clampPositive(params.calories, Number(existing.calories), 50000) : Number(existing.calories),
+    protein: params.protein != null ? clampPositive(params.protein, Number(existing.protein), 5000) : Number(existing.protein),
+    carbs: params.carbs != null ? clampPositive(params.carbs, Number(existing.carbs), 5000) : Number(existing.carbs),
+    fats: params.fats != null ? clampPositive(params.fats, Number(existing.fats), 5000) : Number(existing.fats),
     goal_weight:
       params.goal_weight != null
-        ? Number(params.goal_weight)
+        ? clampPositive(params.goal_weight, existing.goal_weight != null ? Number(existing.goal_weight) : 65, 1000)
         : existing.goal_weight != null
           ? Number(existing.goal_weight)
           : null,
     start_weight:
       params.start_weight != null
-        ? Number(params.start_weight)
+        ? clampPositive(params.start_weight, existing.start_weight != null ? Number(existing.start_weight) : 76, 1000)
         : existing.start_weight != null
           ? Number(existing.start_weight)
           : null,
@@ -1126,64 +1754,75 @@ export async function updateGoals(
     .upsert(patch, { onConflict: "user_id" });
 
   if (error) {
-    return { success: false, error: error.message };
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "tool_error",
+      toolName: "update_goals",
+      failureClass: "db_error",
+      detail: { reason: error.message },
+      context,
+    });
+    return { success: false, error: error.message, failureClass: "db_error" };
   }
 
   await recalcDailyTotals(supabase, userId, date);
-  const state = await buildDailyState(supabase, userId, date);
+  const state = await buildDailyState(supabase, userId, date, context?.timeZone);
+  const changedGoals = summarizeGoalChanges(params, state.goals);
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "goals_updated",
+    toolName: "update_goals",
+    detail: { changedGoals },
+    context,
+  });
 
   return {
     success: true,
     state,
     mode: identity.authenticated ? "authenticated" : "demo",
-    message: "Goals updated",
+    message: changedGoals.length > 0 ? `Saved goals: ${changedGoals.join(", ")}.` : "Goals saved.",
   };
 }
 
-// V2 tool: log_weight
 export async function logWeight(
   params: { weight: number; date?: string; range?: string },
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
-  if (!identity.authenticated && !ALLOW_DEMO_MODE) {
-    return authRequiredResult(identity.authError ?? "Please authenticate before logging weight");
-  }
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "logging weight", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
 
-  if (params.weight == null || Number.isNaN(Number(params.weight))) {
-    return { success: false, error: "weight is required" };
+  const weight = clampPositive(params.weight, 0, 1000);
+  if (weight <= 0) {
+    return { success: false, error: "weight must be a positive number", failureClass: "validation_error" };
   }
 
   const entryDate = normalizeDate(params.date, context?.timeZone);
   const range = String(params.range ?? "90D").toUpperCase();
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(entryDate);
-    state.goals.startWeight = Number(params.weight);
-    await legacySaveState(state);
-    return {
-      success: true,
-      progress: legacyProgressFromState(state, range),
-      mode: identity.authenticated ? "authenticated" : "demo",
-      message: "Weight logged",
-    };
-  }
-
   const userId = identity.userId;
   const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "log_weight", context);
+  if (rateLimitResult) return rateLimitResult;
 
   const { error } = await supabase.from("weight_entries").upsert(
     {
       user_id: userId,
       entry_date: entryDate,
-      weight: Number(params.weight),
+      weight,
       created_at: new Date().toISOString(),
     },
     { onConflict: "user_id,entry_date" },
   );
 
   if (error) {
-    return { success: false, error: error.message };
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "tool_error",
+      toolName: "log_weight",
+      failureClass: "db_error",
+      detail: { reason: error.message, entryDate, range },
+      context,
+    });
+    return { success: false, error: error.message, failureClass: "db_error" };
   }
 
   await supabase.from("badge_events").upsert(
@@ -1195,32 +1834,34 @@ export async function logWeight(
   );
 
   const progress = await buildProgress(supabase, userId, range, context?.timeZone);
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "weight_logged",
+    toolName: "log_weight",
+    detail: { entryDate, weight, range },
+    context,
+  });
+  const streakSummary =
+    progress.streak?.current != null
+      ? ` Current streak is ${Math.round(progress.streak.current)} day${progress.streak.current === 1 ? "" : "s"}.`
+      : "";
+  const bmiSummary = progress.bmi?.value != null ? ` BMI is ${progress.bmi.value.toFixed(1)}.` : "";
 
   return {
     success: true,
     progress,
     mode: identity.authenticated ? "authenticated" : "demo",
-    message: "Weight logged",
+    message: `Saved ${weight.toFixed(1)} kg for ${entryDate}.${streakSummary}${bmiSummary}`.replace(/\s+/g, " ").trim(),
   };
 }
 
-// V2 tool: get_progress
 export async function getProgress(
   params: { range?: string } = {},
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "loading progress", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const range = String(params.range ?? "90D").toUpperCase();
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate(context?.timeZone));
-    return {
-      success: true,
-      progress: legacyProgressFromState(state, range),
-      mode: identity.authenticated ? "authenticated" : "demo",
-    };
-  }
-
   const userId = identity.userId;
   const supabase = dbClient();
 
@@ -1233,7 +1874,6 @@ export async function getProgress(
   };
 }
 
-// V2 tool: update_preferences
 export async function updatePreferences(
   params: {
     unit_weight?: "kg" | "lb";
@@ -1247,41 +1887,20 @@ export async function updatePreferences(
   },
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
-  if (!identity.authenticated && !ALLOW_DEMO_MODE) {
-    return authRequiredResult(identity.authError ?? "Please authenticate before updating preferences");
-  }
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate(context?.timeZone));
-    if (params.unit_weight) state.preferences.unitWeight = params.unit_weight;
-    if (params.unit_energy) state.preferences.unitEnergy = params.unit_energy;
-    if (params.language) state.preferences.language = params.language;
-    if (params.reminder_enabled != null) state.preferences.reminderEnabled = Boolean(params.reminder_enabled);
-    if (params.reminder_time) state.preferences.reminderTime = params.reminder_time;
-    if (params.theme_preset) state.preferences.themePreset = params.theme_preset;
-    if (params.streak_badge_notifications != null) {
-      state.preferences.streakBadgeNotifications = Boolean(params.streak_badge_notifications);
-    }
-    if (params.height_cm != null) state.preferences.heightCm = Number(params.height_cm);
-    await legacySaveState(state);
-    return {
-      success: true,
-      preferences: state.preferences,
-      mode: identity.authenticated ? "authenticated" : "demo",
-      message: "Preferences updated",
-    };
-  }
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "updating preferences", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
 
   const userId = identity.userId;
   const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "update_preferences", context);
+  if (rateLimitResult) return rateLimitResult;
   const existing = await ensurePreferences(supabase, userId);
 
   const patch = {
     user_id: userId,
     unit_weight: params.unit_weight ?? existing.unit_weight,
     unit_energy: params.unit_energy ?? existing.unit_energy,
-    language: params.language ?? existing.language,
+    language: params.language ? sanitizeText(params.language, 10) : String(existing.language),
     reminder_enabled:
       params.reminder_enabled != null
         ? Boolean(params.reminder_enabled)
@@ -1292,7 +1911,7 @@ export async function updatePreferences(
       params.streak_badge_notifications != null
         ? Boolean(params.streak_badge_notifications)
         : Boolean(existing.streak_badge_notifications),
-    height_cm: params.height_cm != null ? Number(params.height_cm) : Number(existing.height_cm),
+    height_cm: params.height_cm != null ? clampPositive(params.height_cm, Number(existing.height_cm), 300) : Number(existing.height_cm),
     updated_at: new Date().toISOString(),
   };
 
@@ -1303,47 +1922,332 @@ export async function updatePreferences(
     .single();
 
   if (error) {
-    return { success: false, error: error.message };
+    await recordAnalyticsEvent(supabase, {
+      userId,
+      eventName: "tool_error",
+      toolName: "update_preferences",
+      failureClass: "db_error",
+      detail: { reason: error.message },
+      context,
+    });
+    return { success: false, error: error.message, failureClass: "db_error" };
   }
+  const changedPreferences = summarizePreferenceChanges(params, data as Record<string, unknown>);
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "preferences_updated",
+    toolName: "update_preferences",
+    detail: { changedPreferences },
+    context,
+  });
 
   return {
     success: true,
     preferences: data,
     mode: identity.authenticated ? "authenticated" : "demo",
-    message: "Preferences updated",
+    message: changedPreferences.length > 0
+      ? `Saved preferences: ${changedPreferences.join(", ")}.`
+      : "Preferences saved.",
   };
 }
 
-// V2 tool: upload_progress_photo
+export async function saveAgentNote(
+  params: { note_key?: string; note_value?: string },
+  context?: RequestContext,
+) {
+  const rawNoteKey = String(params.note_key ?? "").trim();
+  const noteKey = sanitizeNoteKey(params.note_key, 100);
+  const noteValue = sanitizeText(params.note_value, 2000).trim();
+
+  if (!rawNoteKey) {
+    return { success: false, error: "note_key is required" };
+  }
+  if (!noteKey || !NOTE_KEY_RE.test(noteKey)) {
+    return { success: false, error: "Invalid note_key format" };
+  }
+  if (!noteValue) {
+    return { success: false, error: "note_value is required" };
+  }
+
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "saving agent notes", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
+  const userId = identity.userId;
+  const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "save_agent_note", context);
+  if (rateLimitResult) return rateLimitResult;
+
+  const { data, error } = await supabase
+    .from("agent_notes")
+    .upsert(
+      {
+        user_id: userId,
+        note_key: noteKey,
+        note_value: noteValue,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,note_key" },
+    )
+    .select("note_key, note_value, updated_at")
+    .single();
+
+  if (error) {
+    return { success: false, error: error.message };
+  }
+
+  return {
+    success: true,
+    note: mapAgentNote(data as Record<string, unknown>),
+    mode: identity.authenticated ? "authenticated" : "demo",
+    message: "Agent note saved",
+  };
+}
+
+export async function getAgentNotes(
+  _params: Record<string, never> = {},
+  context?: RequestContext,
+) {
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "loading agent notes", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
+  const userId = identity.userId;
+  const supabase = dbClient();
+
+  const notes = await fetchAgentNotes(supabase, userId, "updated_at", false);
+
+  return {
+    success: true,
+    notes,
+    mode: identity.authenticated ? "authenticated" : "demo",
+  };
+}
+
+export async function getUserProfile(
+  params: { range?: string } = {},
+  context?: RequestContext,
+) {
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "loading your profile", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
+  const userId = identity.userId;
+  const range = String(params.range ?? "90D").toUpperCase();
+  const supabase = dbClient();
+
+  const [goals, preferences] = await Promise.all([
+    ensureGoals(supabase, userId),
+    ensurePreferences(supabase, userId),
+  ]);
+
+  const [progress, agentNotes, recentMealCount] = await Promise.all([
+    buildProgress(supabase, userId, range, context?.timeZone),
+    fetchAgentNotes(supabase, userId, "updated_at", false),
+    fetchRecentMealCount(supabase, userId, context?.timeZone),
+  ]);
+  const onboarding = buildOnboardingGuide({
+    recentMealCount,
+    weightEntryCount: progress.weightSeries.length,
+    agentNoteCount: agentNotes.length,
+  });
+
+  return {
+    success: true,
+    profile: {
+      isNewUser: onboarding.isNewUser,
+      onboarding,
+      goals: {
+        calories: Number(goals.calories ?? DEFAULT_GOALS.calories),
+        protein: Number(goals.protein ?? DEFAULT_GOALS.protein),
+        carbs: Number(goals.carbs ?? DEFAULT_GOALS.carbs),
+        fats: Number(goals.fats ?? DEFAULT_GOALS.fats),
+        goalWeight: goals.goal_weight != null ? Number(goals.goal_weight) : null,
+        startWeight: goals.start_weight != null ? Number(goals.start_weight) : null,
+        targetDate: goals.target_date ? String(goals.target_date) : null,
+      },
+      preferences: {
+        unitWeight: (preferences.unit_weight ?? "kg") as "kg" | "lb",
+        unitEnergy: (preferences.unit_energy ?? "kcal") as "kcal" | "kj",
+        language: String(preferences.language ?? "en"),
+        reminderEnabled: Boolean(preferences.reminder_enabled),
+        reminderTime: String(preferences.reminder_time ?? "20:00"),
+        themePreset: String(preferences.theme_preset ?? "midnight"),
+        streakBadgeNotifications: Boolean(preferences.streak_badge_notifications),
+        heightCm: Number(preferences.height_cm ?? DEFAULT_PREFERENCES.height_cm),
+      },
+      trends: {
+        range: progress.range,
+        currentWeight: progress.currentWeight,
+        bmi: progress.bmi,
+        streak: progress.streak.current,
+        weightChanges: progress.weightChanges,
+        dailyAverageCalories: progress.dailyAverageCalories,
+      },
+      recentMealCount,
+      agentNotes,
+    },
+    mode: identity.authenticated ? "authenticated" : "demo",
+  };
+}
+
+export async function getRecentMeals(
+  params: { limit?: number } = {},
+  context?: RequestContext,
+) {
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "loading recent meals", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
+  const userId = identity.userId;
+  const supabase = dbClient();
+  const limit = clampPositive(params.limit, 20, 50);
+
+  const meals = await fetchRecentMeals(supabase, userId, limit);
+
+  return {
+    success: true,
+    meals,
+    mode: identity.authenticated ? "authenticated" : "demo",
+  };
+}
+
+export async function getMealSuggestions(
+  params: { date?: string; limit?: number } = {},
+  context?: RequestContext,
+) {
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "planning meal suggestions", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
+  const userId = identity.userId;
+  const date = normalizeDate(params.date, context?.timeZone);
+  const supabase = dbClient();
+  const limit = clampPositive(params.limit, 3, 8);
+
+  const [state, agentNotes] = await Promise.all([
+    buildDailyState(supabase, userId, date),
+    fetchAgentNotes(supabase, userId, "updated_at", false),
+  ]);
+
+  if (
+    state.goals.calories <= 0 ||
+    state.goals.protein <= 0 ||
+    state.goals.carbs <= 0 ||
+    state.goals.fats <= 0
+  ) {
+    return {
+      success: true,
+      suggestions: [],
+      mode: identity.authenticated ? "authenticated" : "demo",
+    };
+  }
+
+  const remainingCalories = Math.max(state.goals.calories - state.totalCalories, 0);
+  const remainingProtein = Math.max(state.goals.protein - state.totalProtein, 0);
+  const remainingCarbs = Math.max(state.goals.carbs - state.totalCarbs, 0);
+  const remainingFats = Math.max(state.goals.fats - state.totalFats, 0);
+
+  if (remainingCalories === 0 && remainingProtein === 0 && remainingCarbs === 0 && remainingFats === 0) {
+    return {
+      success: true,
+      suggestions: [],
+      mode: identity.authenticated ? "authenticated" : "demo",
+    };
+  }
+
+  const vegetarian = isVegetarianPreference(agentNotes);
+  const templates = [
+    { name: "Protein shake", calories: 180, protein: 30, carbs: 8, fats: 3, vegetarian: true },
+    { name: "Greek yogurt bowl", calories: 220, protein: 20, carbs: 18, fats: 4, vegetarian: true },
+    { name: "Tofu stir-fry", calories: 360, protein: 28, carbs: 30, fats: 14, vegetarian: true },
+    { name: "Grilled chicken salad", calories: 340, protein: 35, carbs: 16, fats: 12, vegetarian: false },
+    { name: "Turkey wrap", calories: 320, protein: 28, carbs: 30, fats: 10, vegetarian: false },
+  ].filter((template) => !vegetarian || template.vegetarian);
+
+  const suggestions = templates
+    .map((template) => {
+      const proteinBias =
+        remainingProtein > state.goals.protein * 0.25 ? template.protein * 2 : template.protein;
+      const caloriePenalty =
+        remainingCalories <= Math.max(400, state.goals.calories * 0.2) ? template.calories : template.calories / 2;
+      const fitPenalty =
+        Math.max(template.calories - (remainingCalories + 150), 0) +
+        Math.max(template.carbs - (remainingCarbs + 40), 0) +
+        Math.max(template.fats - (remainingFats + 20), 0);
+
+      return {
+        ...template,
+        score: proteinBias - caloriePenalty - fitPenalty,
+      };
+    })
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit)
+    .map((template) => ({
+      name: template.name,
+      calories: template.calories,
+      protein: template.protein,
+      carbs: template.carbs,
+      fats: template.fats,
+      reason:
+        remainingProtein > state.goals.protein * 0.25
+          ? "High-protein option to help close today's protein gap."
+          : remainingCalories <= Math.max(400, state.goals.calories * 0.2)
+            ? "Lower-calorie option that fits near today's calorie target."
+            : "Balanced option based on today's remaining calories and macros.",
+    }));
+
+  return {
+    success: true,
+    suggestions,
+    mode: identity.authenticated ? "authenticated" : "demo",
+  };
+}
+
+export async function deleteAgentNote(
+  params: { note_key?: string },
+  context?: RequestContext,
+) {
+  const rawNoteKey = String(params.note_key ?? "").trim();
+  const noteKey = sanitizeNoteKey(params.note_key, 100);
+
+  if (!rawNoteKey) {
+    return { success: false, error: "note_key is required" };
+  }
+  if (!noteKey || !NOTE_KEY_RE.test(noteKey)) {
+    return { success: false, error: "Invalid note_key format" };
+  }
+
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "deleting saved notes", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
+  const userId = identity.userId;
+  const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "delete_agent_note", context);
+  if (rateLimitResult) return rateLimitResult;
+
+  const { error } = await supabase
+    .from("agent_notes")
+    .delete()
+    .eq("user_id", userId)
+    .eq("note_key", noteKey);
+
+  if (error) {
+    return { success: false, error: error.message };
+  }
+
+  return {
+    success: true,
+    deletedKey: noteKey,
+    mode: identity.authenticated ? "authenticated" : "demo",
+    message: "Agent note deleted",
+  };
+}
+
 export async function uploadProgressPhoto(
   params: { image_url: string; note?: string },
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
-  if (!identity.authenticated && !ALLOW_DEMO_MODE) {
-    return authRequiredResult(identity.authError ?? "Please authenticate before uploading a photo");
-  }
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "uploading a photo", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
 
   if (!params.image_url) {
     return { success: false, error: "image_url is required" };
   }
 
-  if (!(await isSchemaReady())) {
-    return {
-      success: true,
-      photo: {
-        id: `legacy_photo_${Date.now()}`,
-        image_url: params.image_url,
-        note: params.note ?? null,
-        captured_at: new Date().toISOString(),
-      },
-      mode: identity.authenticated ? "authenticated" : "demo",
-      message: "Progress photo saved (legacy mode)",
-    };
-  }
-
   const userId = identity.userId;
   const supabase = dbClient();
+  const rateLimitResult = await enforceWriteRateLimit(supabase, userId, "upload_progress_photo", context);
+  if (rateLimitResult) return rateLimitResult;
   const { data, error } = await supabase
     .from("progress_photos")
     .insert({
@@ -1367,38 +2271,33 @@ export async function uploadProgressPhoto(
   };
 }
 
-// V3 tool: run_daily_checkin
 export async function runDailyCheckin(
   params: { date?: string; range?: string } = {},
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "running a daily check-in", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const date = normalizeDate(params.date, context?.timeZone);
   const range = String(params.range ?? "90D").toUpperCase();
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(date);
-    const progress = legacyProgressFromState(state, range);
-    const recommendations = state.totalCalories > state.goals.calories
-      ? ["You are above your daily calorie goal. Keep your next meal lighter."]
-      : ["You are on track today. Keep meal logging consistent."];
-    return {
-      success: true,
-      checkin: {
-        date,
-        calories: { current: state.totalCalories, goal: state.goals.calories },
-        protein: { current: state.totalProtein, goal: state.goals.protein },
-        streak: progress.streak.current,
-        recommendations,
-      },
-      mode: identity.authenticated ? "authenticated" : "demo",
-    };
-  }
-
   const userId = identity.userId;
 
   const { state, progress } = await fetchStateAndProgress(userId, date, range, context?.timeZone);
+  const supabase = dbClient();
+  const resolvedTimeZone = resolveTimeZone(context?.timeZone);
+  const [recentDays, recentMeals] = await Promise.all([
+    fetchRecentDailyTotals(supabase, userId, resolvedTimeZone, 7),
+    fetchRecentMealPatterns(supabase, userId, resolvedTimeZone, 7),
+  ]);
   const recommendations: string[] = [];
+  const patterns = detectCoachingPatterns({
+    goals: state.goals,
+    recentDays,
+    recentMeals,
+    weightSeries: progress.weightSeries,
+    streakCurrent: progress.streak.current,
+    timeZone: resolvedTimeZone,
+  });
+  const observations = buildCheckinPatternObservations(patterns);
 
   if (state.totalCalories < state.goals.calories * 0.5) {
     recommendations.push("You are well below your calorie target today; consider adding a protein-focused meal.");
@@ -1409,68 +2308,97 @@ export async function runDailyCheckin(
   if (state.totalCalories > state.goals.calories) {
     recommendations.push("You are above your calorie target. Keep the next meal lighter and protein-forward.");
   }
+  if (observations.length > 0) {
+    recommendations.push(...observations);
+  }
   if (recommendations.length === 0) {
     recommendations.push("You are tracking well today. Stay consistent with hydration and meal timing.");
   }
+  if (progress.streak.current > 0) {
+    recommendations.push(`Current logging streak: ${progress.streak.current} day${progress.streak.current === 1 ? "" : "s"}.`);
+  }
+  const checkin = {
+    date,
+    calories: {
+      current: state.totalCalories,
+      goal: state.goals.calories,
+    },
+    protein: {
+      current: state.totalProtein,
+      goal: state.goals.protein,
+    },
+    streak: progress.streak.current,
+    observations,
+    recommendations,
+  };
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "daily_checkin_run",
+    toolName: "run_daily_checkin",
+    detail: {
+      date,
+      range,
+      observationCount: observations.length,
+      recommendationCount: recommendations.length,
+      streak: progress.streak.current,
+    },
+    context,
+  });
 
   return {
     success: true,
-    checkin: {
-      date,
-      calories: {
-        current: state.totalCalories,
-        goal: state.goals.calories,
-      },
-      protein: {
-        current: state.totalProtein,
-        goal: state.goals.protein,
-      },
-      streak: progress.streak.current,
-      recommendations,
-    },
+    checkin,
     mode: identity.authenticated ? "authenticated" : "demo",
   };
 }
 
-// V3 tool: run_weekly_review
 export async function runWeeklyReview(
   _params: Record<string, never> = {},
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate(context?.timeZone));
-    return {
-      success: true,
-      review: {
-        period: "last_7_days",
-        consumedAverage: state.totalCalories,
-        burnedAverage: Math.round(state.goals.calories * 0.6),
-        weightDelta7: 0,
-        insights: ["Legacy mode: weekly review is simplified until SQL migration is applied."],
-        suggestion: "Run SQL migration for full analytics.",
-      },
-      mode: identity.authenticated ? "authenticated" : "demo",
-    };
-  }
-
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "running a weekly review", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const userId = identity.userId;
   const supabase = dbClient();
-  const progress = await buildProgress(supabase, userId, "90D", context?.timeZone);
+  const resolvedTimeZone = resolveTimeZone(context?.timeZone);
+
+  const [goals, progress, recentDays, recentMeals] = await Promise.all([
+    ensureGoals(supabase, userId),
+    buildProgress(supabase, userId, "90D", resolvedTimeZone),
+    fetchRecentDailyTotals(supabase, userId, resolvedTimeZone, 7),
+    fetchRecentMealPatterns(supabase, userId, resolvedTimeZone, 7),
+  ]);
 
   const lastWeek = progress.weeklyEnergy.daily;
   const consumedAverage = round(average(lastWeek.map((point) => point.consumed)), 0);
-  const burnedAverage = round(average(lastWeek.map((point) => point.burned)), 0);
+  const calorieGoal = Number(goals.calories ?? DEFAULT_GOALS.calories);
   const weightDelta7 = progress.weightChanges.find((item) => item.label === "7 day")?.delta ?? 0;
+  const weeklyGoals = {
+    calories: Number(goals.calories ?? DEFAULT_GOALS.calories),
+    protein: Number(goals.protein ?? DEFAULT_GOALS.protein),
+    carbs: Number(goals.carbs ?? DEFAULT_GOALS.carbs),
+    fats: Number(goals.fats ?? DEFAULT_GOALS.fats),
+    goalWeight: goals.goal_weight != null ? Number(goals.goal_weight) : null,
+    startWeight: goals.start_weight != null ? Number(goals.start_weight) : null,
+    targetDate: goals.target_date ? String(goals.target_date) : null,
+  };
+  const patterns = detectCoachingPatterns({
+    goals: weeklyGoals,
+    recentDays,
+    recentMeals,
+    weightSeries: progress.weightSeries,
+    streakCurrent: progress.streak.current,
+    timeZone: resolvedTimeZone,
+  });
+  const goalProjection = buildWeightGoalProjection(progress.weightSeries, weeklyGoals);
 
   const insights: string[] = [];
-  if (consumedAverage > burnedAverage) {
-    insights.push("Average weekly intake is above estimated burn, which supports weight gain.");
-  } else if (consumedAverage < burnedAverage) {
-    insights.push("Average weekly intake is below estimated burn, which supports weight loss.");
+  if (consumedAverage > calorieGoal) {
+    insights.push("Average daily intake exceeded your calorie goal this week.");
+  } else if (consumedAverage < calorieGoal * 0.8) {
+    insights.push("Average daily intake was well below your calorie goal this week.");
   } else {
-    insights.push("Average intake and burn are balanced this week.");
+    insights.push("Average daily intake tracked close to your calorie goal this week.");
   }
 
   if (weightDelta7 > 0.3) {
@@ -1481,54 +2409,53 @@ export async function runWeeklyReview(
     insights.push("Weight remained relatively stable over the last 7 days.");
   }
 
+  if (patterns.length > 0) {
+    insights.push(`Detected ${patterns.length} coaching pattern${patterns.length === 1 ? "" : "s"} worth reviewing this week.`);
+  } else {
+    insights.push("No strong risk patterns stood out this week. Consistency is the main priority.");
+  }
+
+  const actionPlan = Array.from(new Set(patterns.map((pattern) => pattern.action)));
+  if (actionPlan.length === 0) {
+    actionPlan.push("Stay consistent with logging and rerun the review after a few more days of data.");
+  }
+  const review = {
+    period: "last_7_days",
+    consumedAverage,
+    calorieGoal,
+    weightDelta7,
+    insights,
+    patterns,
+    actionPlan,
+    goalProjection,
+    suggestion: "Use suggest_goal_adjustments for a numeric goal recommendation.",
+  };
+  await recordAnalyticsEvent(supabase, {
+    userId,
+    eventName: "weekly_review_run",
+    toolName: "run_weekly_review",
+    detail: {
+      period: review.period,
+      patternCount: review.patterns.length,
+      actionPlanCount: review.actionPlan.length,
+      hasGoalProjection: Boolean(review.goalProjection),
+    },
+    context,
+  });
+
   return {
     success: true,
-    review: {
-      period: "last_7_days",
-      consumedAverage,
-      burnedAverage,
-      weightDelta7,
-      insights,
-      suggestion: "Use suggest_goal_adjustments for a numeric goal recommendation.",
-    },
+    review,
     mode: identity.authenticated ? "authenticated" : "demo",
   };
 }
 
-// V3 tool: suggest_goal_adjustments
 export async function suggestGoalAdjustments(
   _params: Record<string, never> = {},
   context?: RequestContext,
 ) {
-  const identity = await resolveIdentity(context);
-
-  if (!(await isSchemaReady())) {
-    const state = await legacyGetState(todayIsoDate(context?.timeZone));
-    return {
-      success: true,
-      suggestion: {
-        currentGoals: {
-          calories: state.goals.calories,
-          protein: state.goals.protein,
-          carbs: state.goals.carbs,
-          fats: state.goals.fats,
-        },
-        proposedGoals: {
-          calories: state.goals.calories,
-          protein: state.goals.protein,
-          carbs: state.goals.carbs,
-          fats: state.goals.fats,
-        },
-        rationale: {
-          weeklyAverageCalories: state.totalCalories,
-          weightDelta30: 0,
-          note: "Legacy mode returns current goals. Run SQL migration for adaptive recommendations.",
-        },
-      },
-      mode: identity.authenticated ? "authenticated" : "demo",
-    };
-  }
-
+  const { identity, authErrorResult } = await resolveAuthorizedIdentity(context, "suggesting goal adjustments", REQUIRED_OAUTH_SCOPE);
+  if (authErrorResult) return authErrorResult;
   const userId = identity.userId;
   const supabase = dbClient();
 

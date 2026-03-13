@@ -13,6 +13,12 @@ const requiredTools = [
   'run_daily_checkin',
   'run_weekly_review',
   'suggest_goal_adjustments',
+  'get_user_profile',
+  'get_recent_meals',
+  'get_meal_suggestions',
+  'save_agent_note',
+  'get_agent_notes',
+  'delete_agent_note',
 ];
 
 for (const tool of requiredTools) {
@@ -21,8 +27,8 @@ for (const tool of requiredTools) {
   }
 }
 
-if (!text.includes('ui://widget/gpt-calories-v4.html')) {
-  throw new Error('Widget URI v4 is missing in MCP contract');
+if (!text.includes('const WIDGET_VERSION = "v13"') && !text.includes('ui://widget/gpt-calories-v13.html')) {
+  throw new Error('Widget URI v13 is missing in MCP contract');
 }
 
 if (!text.includes('mcp/www_authenticate')) {

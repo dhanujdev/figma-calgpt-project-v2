@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CalGPT OAuth Consent</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f3ee;
+      --surface: #fffdf8;
+      --surface-2: #f0e6d8;
+      --text: #1d1a16;
+      --muted: #6c645b;
+      --line: #d8c9b5;
+      --accent: #0f766e;
+      --accent-2: #115e59;
+      --danger: #b42318;
+      --shadow: 0 24px 50px rgba(63, 44, 21, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 30%),
+        linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+      color: var(--text);
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .shell {
+      width: min(720px, 100%);
+      background: color-mix(in srgb, var(--surface) 92%, white);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .hero {
+      padding: 28px 28px 20px;
+      background:
+        linear-gradient(135deg, rgba(15, 118, 110, 0.12), transparent 55%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(240, 230, 216, 0.7));
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      font: 600 12px/1.2 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 5vw, 44px);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+    }
+
+    .subtitle {
+      margin: 14px 0 0;
+      max-width: 52ch;
+      color: var(--muted);
+      font: 500 16px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .content {
+      padding: 28px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--surface);
+      padding: 18px;
+    }
+
+    .label {
+      margin: 0 0 10px;
+      font: 700 12px/1.2 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .value {
+      margin: 0;
+      font: 600 18px/1.35 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .scope-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font: 500 15px/1.6 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .scope-list li + li {
+      margin-top: 6px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: 700 14px/1 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+      transition: transform 120ms ease, background-color 120ms ease, opacity 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+      transform: none;
+    }
+
+    .primary {
+      background: var(--accent);
+      color: white;
+    }
+
+    .primary:hover {
+      background: var(--accent-2);
+    }
+
+    .secondary {
+      background: var(--surface-2);
+      color: var(--text);
+    }
+
+    .secondary:hover {
+      background: #e7d9c5;
+    }
+
+    .danger {
+      background: #fef3f2;
+      color: var(--danger);
+    }
+
+    .status {
+      min-height: 24px;
+      font: 600 14px/1.4 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--muted);
+    }
+
+    .status.error {
+      color: var(--danger);
+    }
+
+    .status.success {
+      color: var(--accent-2);
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">CalGPT Authentication</p>
+      <h1>Link your nutrition account</h1>
+      <p class="subtitle">
+        ChatGPT is requesting permission to access your private CalGPT nutrition data through Supabase Auth.
+        Sign in with Google, review the requested scopes, and approve the request to continue.
+      </p>
+    </section>
+    <section class="content">
+      <div class="card">
+        <p class="label">Request</p>
+        <p class="value" id="client-name">Loading authorization details...</p>
+      </div>
+      <div class="card">
+        <p class="label">Scopes</p>
+        <ul class="scope-list" id="scopes">
+          <li>Loading requested permissions...</li>
+        </ul>
+      </div>
+      <div class="actions" id="actions"></div>
+      <div class="status" id="status" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script>
+    const query = new URLSearchParams(window.location.search);
+    const authorizationId = query.get("authorization_id");
+    const statusNode = document.getElementById("status");
+    const actionsNode = document.getElementById("actions");
+    const clientNode = document.getElementById("client-name");
+    const scopesNode = document.getElementById("scopes");
+    let supabaseClient = null;
+    let authDetails = null;
+
+    function setStatus(message, tone) {
+      statusNode.textContent = message;
+      statusNode.className = tone ? `status ${tone}` : "status";
+    }
+
+    function setBusy(message) {
+      setStatus(message, null);
+      actionsNode.querySelectorAll("button").forEach((button) => {
+        button.disabled = true;
+      });
+    }
+
+    function setScopes(scopes) {
+      scopesNode.innerHTML = "";
+      const items = scopes.length > 0 ? scopes : ["calgpt.read", "calgpt.write"];
+      for (const scope of items) {
+        const li = document.createElement("li");
+        li.textContent =
+          scope === "calgpt.write"
+            ? "Write access so ChatGPT can log meals, weights, goals, and preferences on your behalf."
+            : "Read access so ChatGPT can show your dashboard, progress, and coaching insights.";
+        scopesNode.appendChild(li);
+      }
+    }
+
+    function renderUnauthenticated(provider) {
+      actionsNode.innerHTML = "";
+      const button = document.createElement("button");
+      button.className = "primary";
+      button.textContent = "Continue with Google";
+      button.addEventListener("click", async () => {
+        try {
+          setBusy("Redirecting to Google sign-in...");
+          const redirectTo = window.location.origin + window.location.pathname + window.location.search;
+          const { error } = await supabaseClient.auth.signInWithOAuth({
+            provider,
+            options: {
+              redirectTo,
+              queryParams: { access_type: "offline", prompt: "consent" },
+            },
+          });
+          if (error) {
+            throw error;
+          }
+        } catch (error) {
+          setStatus(String(error.message || error), "error");
+          renderUnauthenticated(provider);
+        }
+      });
+      actionsNode.appendChild(button);
+      setStatus("Sign in with Google to continue the ChatGPT connection.", null);
+    }
+
+    function renderConsent(details) {
+      actionsNode.innerHTML = "";
+      clientNode.textContent = details.client_name || "ChatGPT";
+      setScopes(details.scopes || []);
+
+      const approve = document.createElement("button");
+      approve.className = "primary";
+      approve.textContent = "Approve access";
+      approve.addEventListener("click", async () => {
+        try {
+          setBusy("Approving access...");
+          const { data, error } = await supabaseClient.auth.oauth.approveAuthorization(authorizationId);
+          if (error) throw error;
+          if (data && data.redirect_to) {
+            window.location.assign(data.redirect_to);
+            return;
+          }
+          setStatus("Authorization approved. You can return to ChatGPT if redirect does not happen automatically.", "success");
+        } catch (error) {
+          setStatus(String(error.message || error), "error");
+          renderConsent(details);
+        }
+      });
+
+      const deny = document.createElement("button");
+      deny.className = "danger";
+      deny.textContent = "Deny";
+      deny.addEventListener("click", async () => {
+        try {
+          setBusy("Denying access...");
+          const { data, error } = await supabaseClient.auth.oauth.denyAuthorization(authorizationId);
+          if (error) throw error;
+          if (data && data.redirect_to) {
+            window.location.assign(data.redirect_to);
+            return;
+          }
+          setStatus("Authorization denied. You can close this page.", null);
+        } catch (error) {
+          setStatus(String(error.message || error), "error");
+          renderConsent(details);
+        }
+      });
+
+      actionsNode.append(approve, deny);
+      setStatus("Review the permissions above, then approve to finish linking CalGPT in ChatGPT.", null);
+    }
+
+    async function init() {
+      if (!authorizationId) {
+        setStatus("Missing authorization request. Reconnect CalGPT from ChatGPT and try again.", "error");
+        clientNode.textContent = "Authorization request not found";
+        setScopes([]);
+        return;
+      }
+
+      try {
+        const configResponse = await fetch("/api/oauth-client-config", {
+          headers: { Accept: "application/json" },
+        });
+        const config = await configResponse.json();
+        if (!configResponse.ok) {
+          throw new Error(config.error || "Failed to load auth configuration");
+        }
+
+        supabaseClient = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey, {
+          auth: {
+            flowType: "pkce",
+            autoRefreshToken: true,
+            detectSessionInUrl: true,
+            persistSession: true,
+          },
+        });
+
+        const {
+          data: { session },
+        } = await supabaseClient.auth.getSession();
+
+        if (!session) {
+          clientNode.textContent = "Google sign-in required";
+          setScopes([]);
+          renderUnauthenticated(config.provider || "google");
+          return;
+        }
+
+        const { data, error } = await supabaseClient.auth.oauth.getAuthorizationDetails(authorizationId);
+        if (error) throw error;
+        authDetails = data || {};
+        renderConsent(authDetails);
+      } catch (error) {
+        clientNode.textContent = "Authorization unavailable";
+        setScopes([]);
+        setStatus(String(error.message || error), "error");
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -23,19 +23,19 @@ const SERVER_INFO = {
   version: "2.0.0",
 };
 
-const WIDGET_URI = "ui://widget/gpt-calories-v4.html";
+const WIDGET_VERSION = "v13";
+const WIDGET_URI = `ui://widget/gpt-calories-${WIDGET_VERSION}.html`;
 const WIDGET_MIME_TYPE = "text/html;profile=mcp-app";
+const OAUTH_SCOPES = ["openid", "email", "profile"] as const;
 const NOAUTH_SCHEME = { type: "noauth" } as const;
 const OAUTH2_SCHEME = {
   type: "oauth2",
-  scopes: ["calgpt.read", "calgpt.write"],
+  scopes: [...OAUTH_SCOPES],
 } as const;
 const AUTH_MODE = process.env.MCP_AUTH_MODE?.trim().toLowerCase() === "oauth" ? "oauth" : "noauth";
 const OAUTH_ENABLED = AUTH_MODE === "oauth";
 const DEFAULT_TIMEZONE = process.env.MCP_DEFAULT_TIMEZONE?.trim() || "America/New_York";
-const TOOL_SECURITY_SCHEMES = OAUTH_ENABLED
-  ? ([NOAUTH_SCHEME, OAUTH2_SCHEME] as const)
-  : ([NOAUTH_SCHEME] as const);
+const TOOL_SECURITY_SCHEMES = OAUTH_ENABLED ? ([OAUTH2_SCHEME] as const) : ([NOAUTH_SCHEME] as const);
 
 const SHARED_UI_META = {
   ui: {
@@ -68,12 +68,21 @@ function toolMeta(invoking: string, invoked: string) {
   };
 }
 
+function buildFailureTelemetry(toolName: string, error: string, failureClass = "tool_error") {
+  return {
+    toolName,
+    widgetVersion: WIDGET_VERSION,
+    failureClass,
+    error,
+  };
+}
+
 const TOOL_DEFS: ToolDef[] = [
   {
     name: "log_meal",
     title: "Log meal",
     description:
-      "Use this when the user reports a meal and calories/macros that should be added to today's log.",
+      "Use this when the user asks you in chat to log a meal with calories/macros for today's record, including cases where you estimated the meal and want to save a short note about that estimate. Call it directly instead of announcing the tool call first, then reply with one concise confirmation and only the most important changed totals.",
     inputSchema: {
       type: "object",
       properties: {
@@ -82,6 +91,10 @@ const TOOL_DEFS: ToolDef[] = [
         protein: { type: "number", description: "Protein in grams" },
         carbs: { type: "number", description: "Carbs in grams" },
         fats: { type: "number", description: "Fats in grams" },
+        estimation_notes: {
+          type: "string",
+          description: "Optional short note explaining an assistant estimate, assumption, or uncertainty about the meal.",
+        },
         date: { type: "string", description: "Optional YYYY-MM-DD override" },
       },
       required: ["name", "calories"],
@@ -95,7 +108,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "sync_state",
     title: "Sync state",
     description:
-      "Use this when the assistant needs the latest daily totals, goals, preferences, and progress payload.",
+      "Use this when the user asks to see their dashboard, progress, or settings, or when the assistant needs the latest daily totals, goals, preferences, progress, and onboarding state before replying. Call it directly without preamble, then keep the follow-up to a short orientation instead of repeating every visible value from the widget.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,7 +133,7 @@ const TOOL_DEFS: ToolDef[] = [
   {
     name: "delete_meal",
     title: "Delete meal",
-    description: "Use this when a logged meal should be removed by meal ID.",
+    description: "Use this when the user asks you in chat to remove a logged meal by meal ID. Call it directly, then confirm the deleted meal and any important total change in one concise follow-up.",
     inputSchema: {
       type: "object",
       properties: {
@@ -138,7 +151,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "update_goals",
     title: "Update goals",
     description:
-      "Use this when the user asks to update calorie/macro or weight target settings. This writes user goals.",
+      "Use this when the user asks you in chat to update calorie, macro, or weight target settings. This writes user goals, so call it directly and confirm the saved values clearly in one concise reply.",
     inputSchema: {
       type: "object",
       properties: {
@@ -159,7 +172,7 @@ const TOOL_DEFS: ToolDef[] = [
   {
     name: "log_weight",
     title: "Log weight",
-    description: "Use this when the user shares a weight value and wants progress updated.",
+    description: "Use this when the user asks you in chat to log a weight value so progress data is updated. Call it directly, then reply with the saved weight and only one or two relevant trend notes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -200,7 +213,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "update_preferences",
     title: "Update preferences",
     description:
-      "Use this when the user changes units, language, reminder settings, theme, notifications, or height.",
+      "Use this when the user asks you in chat to change units, language, reminder settings, theme, notifications, or height. This writes preferences, so call it directly and summarize only the saved changes explicitly.",
     inputSchema: {
       type: "object",
       properties: {
@@ -220,10 +233,127 @@ const TOOL_DEFS: ToolDef[] = [
     _meta: toolMeta("Saving preferences...", "Preferences saved"),
   },
   {
+    name: "save_agent_note",
+    title: "Save agent note",
+    description:
+      "Use this when you learn a durable user fact worth remembering across conversations, such as dietary restrictions, allergies, food preferences, exercise habits, or lifestyle patterns. Save only persistent details, not turn-by-turn summaries or temporary context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_key: {
+          type: "string",
+          description: 'Stable key, ideally category:detail such as "allergy:peanuts" or "preference:high-protein".',
+        },
+        note_value: {
+          type: "string",
+          description: "Short persistent fact to remember for future conversations.",
+        },
+      },
+      required: ["note_key", "note_value"],
+      additionalProperties: false,
+    },
+    securitySchemes: TOOL_SECURITY_SCHEMES,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    _meta: toolMeta("Saving note...", "Note saved"),
+  },
+  {
+    name: "get_user_profile",
+    title: "Get user profile",
+    description:
+      "Use this at the start of a conversation or before making personalized coaching recommendations when you need the user's goals, preferences, trend summary, recent meal activity, saved persistent notes, and onboarding status in one call. If profile.isNewUser is true, guide them with concrete starter prompts instead of reciting sparse stats. Keep any summary short and focused on what the user should do next.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        range: {
+          type: "string",
+          enum: ["7D", "14D", "30D", "90D", "6M", "1Y", "ALL"],
+          description: "Optional analytics window for the embedded trend summary.",
+        },
+      },
+      additionalProperties: false,
+    },
+    securitySchemes: TOOL_SECURITY_SCHEMES,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    _meta: toolMeta("Loading profile...", "Profile ready"),
+  },
+  {
+    name: "get_recent_meals",
+    title: "Get recent meals",
+    description:
+      "Use this when you want the user's commonly logged recent meals across dates, especially for quick suggestions, repeat logging, or understanding their usual eating patterns.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "Maximum number of unique meals to return. Defaults to 20.",
+        },
+      },
+      additionalProperties: false,
+    },
+    securitySchemes: TOOL_SECURITY_SCHEMES,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    _meta: toolMeta("Loading recent meals...", "Recent meals ready"),
+  },
+  {
+    name: "get_meal_suggestions",
+    title: "Get meal suggestions",
+    description:
+      "Use this when the user asks what they should eat next and you want suggestions based on their remaining calorie and macro targets, while respecting durable preferences such as vegetarian notes when available.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        date: {
+          type: "string",
+          description: "Optional YYYY-MM-DD override for which day to evaluate remaining calories and macros.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of suggestions to return. Defaults to 3.",
+        },
+      },
+      additionalProperties: false,
+    },
+    securitySchemes: TOOL_SECURITY_SCHEMES,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    _meta: toolMeta("Planning meals...", "Meal suggestions ready"),
+  },
+  {
+    name: "get_agent_notes",
+    title: "Get agent notes",
+    description:
+      "Use this when you need the user's previously saved persistent notes, especially before making coaching suggestions that may depend on allergies, preferences, or recurring habits.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    securitySchemes: TOOL_SECURITY_SCHEMES,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    _meta: toolMeta("Loading notes...", "Notes ready"),
+  },
+  {
+    name: "delete_agent_note",
+    title: "Delete agent note",
+    description:
+      "Use this when the user explicitly wants a saved persistent fact removed or corrected by key, for example if an old dietary preference or allergy note is no longer accurate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_key: { type: "string", description: "Persistent note key to delete." },
+      },
+      required: ["note_key"],
+      additionalProperties: false,
+    },
+    securitySchemes: TOOL_SECURITY_SCHEMES,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    _meta: toolMeta("Deleting note...", "Note deleted"),
+  },
+  {
     name: "upload_progress_photo",
     title: "Upload progress photo",
     description:
-      "Use this when the user wants to attach a progress image URL for visual tracking history.",
+      "Use this when the user asks you in chat to attach a progress image URL for visual tracking history.",
     inputSchema: {
       type: "object",
       properties: {
@@ -241,7 +371,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "run_daily_checkin",
     title: "Run daily check-in",
     description:
-      "Use this when the user asks for a daily coaching summary and recommendations without modifying data.",
+      "Use this when the user asks for an end-of-day coaching summary, or when you want a quick proactive read on short-term nutrition patterns without modifying any data. Call it directly, then summarize the top signals and next step without narrating the tool use twice.",
     inputSchema: {
       type: "object",
       properties: {
@@ -261,7 +391,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "run_weekly_review",
     title: "Run weekly review",
     description:
-      "Use this when the user asks for a structured weekly trend review based on logged data.",
+      "Use this when the user asks for a structured weekly trend review, or when you want to proactively surface recurring patterns, plateau risk, streak milestones, and goal projection from logged data. Call it directly, then give one compact review summary and let the widget carry the detail.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -275,7 +405,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "suggest_goal_adjustments",
     title: "Suggest goal adjustments",
     description:
-      "Use this when the user wants suggested goal updates. This tool does not write data; it returns recommendations only.",
+      "Use this when the user asks in chat for suggested goal updates before deciding whether to change goals. This tool does not write data; it returns recommendations only. Keep the follow-up focused on the recommendation, not a long narration of the call.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -337,11 +467,138 @@ function widgetResourceMeta(context: RpcContext) {
       resource_domains: resourceDomainList,
     },
     "openai/widgetDescription":
-      "Shows calories, macros, progress analytics, goals, and settings from GPT-Calories.",
+      "Shows a read-only CalGPT dashboard with onboarding prompts, progress, settings, check-ins, weekly reviews, and clear last-update confirmations after agent actions. Users ask the agent in chat for all writes. When this widget renders, avoid restating every visible metric; prefer one concise takeaway plus the next best action.",
   };
 }
 
-function toolStructuredContent(toolResult: Record<string, unknown>) {
+type ActionSummary = {
+  title: string;
+  summary: string;
+  detailLines?: string[];
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function summarizeMealTotals(state: Record<string, unknown>) {
+  const goals = asRecord(state.goals);
+  const totalCalories = asNumber(state.totalCalories);
+  const calorieGoal = goals ? asNumber(goals.calories) : null;
+  const meals = Array.isArray(state.meals) ? state.meals.length : null;
+
+  const parts: string[] = [];
+  if (totalCalories != null && calorieGoal != null) {
+    parts.push(`Today is ${Math.round(totalCalories)}/${Math.round(calorieGoal)} kcal.`);
+  }
+  if (meals != null) {
+    parts.push(`${meals} meal${meals === 1 ? "" : "s"} logged.`);
+  }
+  return parts.join(" ");
+}
+
+function buildActionSummary(
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+  toolResult: Record<string, unknown>,
+): ActionSummary | null {
+  const state = asRecord(toolResult.state);
+  const progress = asRecord(toolResult.progress);
+  const preferences = asRecord(toolResult.preferences);
+
+  if (toolName === "log_meal" && state) {
+    const mealName = String(toolArgs.name ?? "Meal");
+    const calories = asNumber(toolArgs.calories);
+    const prefix = calories != null ? `${mealName} saved for ${Math.round(calories)} kcal.` : `${mealName} saved.`;
+    return {
+      title: "Meal saved",
+      summary: [prefix, summarizeMealTotals(state)].filter(Boolean).join(" "),
+    };
+  }
+
+  if (toolName === "delete_meal" && state) {
+    return {
+      title: "Meal removed",
+      summary: [
+        toolResult.deletedMealName
+          ? `${String(toolResult.deletedMealName)} was removed.`
+          : "The meal was deleted.",
+        summarizeMealTotals(state),
+      ].filter(Boolean).join(" "),
+    };
+  }
+
+  if (toolName === "log_weight" && progress) {
+    const currentWeight = asNumber(progress.currentWeight);
+    const streak = asRecord(progress.streak);
+    const currentStreak = streak ? asNumber(streak.current) : null;
+    const bmi = asRecord(progress.bmi);
+    const bmiValue = bmi ? asNumber(bmi.value) : null;
+    const bmiStatus = bmi && typeof bmi.status === "string" ? bmi.status : null;
+    const details = [];
+    if (currentWeight != null) details.push(`Current weight ${currentWeight.toFixed(1)} kg`);
+    if (currentStreak != null) details.push(`Streak ${Math.round(currentStreak)} day${currentStreak === 1 ? "" : "s"}`);
+    if (bmiValue != null && bmiStatus) details.push(`BMI ${bmiValue.toFixed(1)} (${bmiStatus})`);
+    return {
+      title: "Weight saved",
+      summary:
+        currentWeight != null
+          ? `Your latest weight is ${currentWeight.toFixed(1)} kg and progress has been refreshed.`
+          : "Your latest weight was saved and progress has been refreshed.",
+      detailLines: details,
+    };
+  }
+
+  if (toolName === "update_goals" && state) {
+    const goals = asRecord(state.goals);
+    const details: string[] = [];
+    if (goals) {
+      if (toolArgs.calories != null && asNumber(goals.calories) != null) details.push(`Calories goal ${Math.round(Number(goals.calories))} kcal`);
+      if (toolArgs.protein != null && asNumber(goals.protein) != null) details.push(`Protein goal ${Math.round(Number(goals.protein))} g`);
+      if (toolArgs.carbs != null && asNumber(goals.carbs) != null) details.push(`Carbs goal ${Math.round(Number(goals.carbs))} g`);
+      if (toolArgs.fats != null && asNumber(goals.fats) != null) details.push(`Fats goal ${Math.round(Number(goals.fats))} g`);
+      if (toolArgs.goal_weight != null && asNumber(goals.goalWeight) != null) details.push(`Goal weight ${Number(goals.goalWeight).toFixed(1)} kg`);
+      if (toolArgs.target_date != null && goals.targetDate) details.push(`Target date ${String(goals.targetDate)}`);
+    }
+    return {
+      title: "Goals updated",
+      summary: details.length > 0 ? "Your nutrition targets were saved." : "Your nutrition goals were saved.",
+      detailLines: details,
+    };
+  }
+
+  if (toolName === "update_preferences" && preferences) {
+    const details: string[] = [];
+    if (toolArgs.unit_weight != null && preferences.unit_weight) details.push(`Weight unit ${String(preferences.unit_weight)}`);
+    if (toolArgs.unit_energy != null && preferences.unit_energy) details.push(`Energy unit ${String(preferences.unit_energy)}`);
+    if (toolArgs.language != null && preferences.language) details.push(`Language ${String(preferences.language)}`);
+    if (toolArgs.reminder_enabled != null) details.push(`Reminders ${preferences.reminder_enabled === false ? "off" : "on"}`);
+    if (toolArgs.reminder_time != null && preferences.reminder_time) details.push(`Reminder time ${String(preferences.reminder_time)}`);
+    if (toolArgs.theme_preset != null && preferences.theme_preset) details.push(`Theme ${String(preferences.theme_preset)}`);
+    if (toolArgs.streak_badge_notifications != null) {
+      details.push(`Badge notifications ${preferences.streak_badge_notifications === false ? "off" : "on"}`);
+    }
+    if (toolArgs.height_cm != null && preferences.height_cm != null) details.push(`Height ${Math.round(Number(preferences.height_cm))} cm`);
+    return {
+      title: "Preferences updated",
+      summary: details.length > 0 ? "Your preferences were saved." : "Your preferences were updated.",
+      detailLines: details,
+    };
+  }
+
+  return null;
+}
+
+function toolStructuredContent(
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+  toolResult: Record<string, unknown>,
+) {
+  const actionSummary = buildActionSummary(toolName, toolArgs, toolResult);
   if (toolResult.state && typeof toolResult.state === "object") {
     return {
       ...(toolResult.state as Record<string, unknown>),
@@ -352,6 +609,8 @@ function toolStructuredContent(toolResult: Record<string, unknown>) {
       preferences: toolResult.preferences,
       mode: toolResult.mode,
       success: toolResult.success,
+      message: toolResult.message,
+      actionSummary,
     };
   }
   if (toolResult.progress && typeof toolResult.progress === "object") {
@@ -359,10 +618,22 @@ function toolStructuredContent(toolResult: Record<string, unknown>) {
       progress: toolResult.progress,
       success: toolResult.success,
       mode: toolResult.mode,
+      message: toolResult.message,
+      actionSummary,
     };
   }
-  return toolResult;
+  return {
+    ...toolResult,
+    actionSummary,
+  };
 }
+
+export const __testables = {
+  buildActionSummary,
+  toolStructuredContent,
+  authChallengeMeta,
+  OAUTH_SCOPES,
+};
 
 function setCors(res: VercelResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -405,6 +676,7 @@ function parseBody(req: VercelRequest): JsonRpcRequest | JsonRpcRequest[] {
 async function callSupabaseTool(
   name: string,
   args: Record<string, unknown>,
+  appOrigin: string,
   incomingAuthHeader?: string,
   incomingTimeZone?: string,
 ) {
@@ -439,6 +711,9 @@ async function callSupabaseTool(
   if (incomingTimeZone) {
     headers["X-User-Timezone"] = incomingTimeZone;
   }
+  headers["X-CalGPT-Resource"] = `${appOrigin}/mcp`;
+  headers["X-CalGPT-Source"] = "mcp_gateway";
+  headers["X-CalGPT-Widget-Version"] = WIDGET_VERSION;
 
   let lastError = "Supabase function call failed";
 
@@ -493,7 +768,7 @@ function authChallengeMeta(context: RpcContext) {
   const resourceMetadataUrl = `${context.appOrigin}/.well-known/oauth-protected-resource`;
   return {
     "mcp/www_authenticate": [
-      `Bearer resource_metadata=\"${resourceMetadataUrl}\", error=\"insufficient_scope\", error_description=\"Authentication required for this tool\"`,
+      `Bearer resource_metadata=\"${resourceMetadataUrl}\", scope=\"${OAUTH_SCOPES.join(" ")}\", error=\"insufficient_scope\", error_description=\"Authentication required for this tool\"`,
     ],
   };
 }
@@ -540,8 +815,8 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
       resources: [
         {
           uri: WIDGET_URI,
-          name: "GPT-Calories Widget v4",
-          description: "Interactive nutrition, progress, and settings widget",
+          name: "GPT-Calories Widget v13",
+          description: "Read-only nutrition, progress, onboarding, and coaching widget",
           mimeType: WIDGET_MIME_TYPE,
         },
       ],
@@ -586,6 +861,7 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
       const toolResult = await callSupabaseTool(
         toolName,
         toolArgs,
+        context.appOrigin,
         context.incomingAuthHeader,
         context.incomingTimeZone,
       );
@@ -597,6 +873,11 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
           structuredContent: {
             success: false,
             error: String(toolResult.error ?? "Authentication required"),
+            telemetry: buildFailureTelemetry(
+              toolName,
+              String(toolResult.error ?? "Authentication required"),
+              String(toolResult.failureClass ?? "auth_required"),
+            ),
           },
           ...(authMeta ? { _meta: authMeta } : {}),
           isError: true,
@@ -610,7 +891,7 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
 
       return ok(id, {
         content: [{ type: "text", text: String(message) }],
-        structuredContent: toolStructuredContent(toolResult),
+        structuredContent: toolStructuredContent(toolName, toolArgs, toolResult),
         _meta: {
           rawResult: toolResult,
         },
@@ -627,6 +908,7 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
         structuredContent: {
           success: false,
           error: String(error),
+          telemetry: buildFailureTelemetry(toolName, String(error), "gateway_call_failed"),
         },
         isError: true,
       });

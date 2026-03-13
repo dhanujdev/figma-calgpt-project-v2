@@ -1,4 +1,5 @@
 const base = process.env.MCP_BASE_URL;
+const oauthMode = process.env.MCP_AUTH_MODE?.trim().toLowerCase() === 'oauth';
 
 if (!base) {
   console.log('smoke-mcp: skipped (set MCP_BASE_URL to run live smoke tests)');
@@ -25,6 +26,21 @@ const assertNoUnknownMethod = (label, rpcResult) => {
   }
 };
 
+const assertAuthAwareResult = (label, rpcResult) => {
+  assertNoUnknownMethod(label, rpcResult);
+  const result = rpcResult?.result ?? {};
+  if (oauthMode) {
+    const authMeta = result?._meta?.['mcp/www_authenticate'];
+    if (!result?.isError || !Array.isArray(authMeta) || authMeta.length === 0) {
+      throw new Error(`${label} did not return an OAuth challenge`);
+    }
+    return;
+  }
+  if (result?.isError) {
+    throw new Error(`${label} unexpectedly returned an error: ${JSON.stringify(result)}`);
+  }
+};
+
 await post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
 const tools = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 if (!Array.isArray(tools.result?.tools) || tools.result.tools.length < 6) {
@@ -39,8 +55,8 @@ for (const required of ['log_weight', 'get_progress', 'update_preferences', 'run
 
 const resources = await post({ jsonrpc: '2.0', id: 3, method: 'resources/list' });
 const uri = resources.result?.resources?.[0]?.uri;
-if (!uri || !String(uri).includes('v4')) {
-  throw new Error('resources/list missing v4 widget URI');
+if (!uri || !String(uri).includes('v13')) {
+  throw new Error('resources/list missing v13 widget URI');
 }
 
 await post({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri } });
@@ -50,7 +66,7 @@ const syncState = await post({
   method: 'tools/call',
   params: { name: 'sync_state', arguments: {} },
 });
-assertNoUnknownMethod('sync_state', syncState);
+assertAuthAwareResult('sync_state', syncState);
 
 const progress = await post({
   jsonrpc: '2.0',
@@ -58,7 +74,7 @@ const progress = await post({
   method: 'tools/call',
   params: { name: 'get_progress', arguments: { range: '90D' } },
 });
-assertNoUnknownMethod('get_progress', progress);
+assertAuthAwareResult('get_progress', progress);
 
 const checkin = await post({
   jsonrpc: '2.0',
@@ -66,6 +82,6 @@ const checkin = await post({
   method: 'tools/call',
   params: { name: 'run_daily_checkin', arguments: {} },
 });
-assertNoUnknownMethod('run_daily_checkin', checkin);
+assertAuthAwareResult('run_daily_checkin', checkin);
 
 console.log('smoke-mcp: OK');

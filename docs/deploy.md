@@ -4,7 +4,7 @@
 
 - Public MCP URL: `https://figma-calgpt-project-v2.vercel.app/mcp`
 - Diagnostic MCP URL: `https://figma-calgpt-project-v2.vercel.app/api/mcp`
-- Widget URI: `ui://widget/gpt-calories-v4.html`
+- Widget URI: `ui://widget/gpt-calories-v13.html`
 - Supabase function endpoint: `https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp`
 
 ## Required Configuration
@@ -14,7 +14,7 @@
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_MCP_ENDPOINT`
-- `MCP_AUTH_MODE=noauth` for the current ChatGPT connector path
+- `MCP_AUTH_MODE=oauth`
 - `MCP_DEFAULT_TIMEZONE=America/New_York`
 
 ### Supabase function secrets
@@ -24,9 +24,17 @@
 - `ALLOW_DEMO_MODE=false`
 - `MCP_DEFAULT_TIMEZONE=America/New_York`
 
+### Supabase dashboard auth settings
+
+- Enable Google under Auth -> Sign In / Providers
+- Set Site URL to `https://figma-calgpt-project-v2.vercel.app`
+- Add `https://figma-calgpt-project-v2.vercel.app/oauth/consent` to the redirect allowlist
+- Enable Auth -> OAuth -> OAuth Server
+- Set the authorization path to `/oauth/consent`
+
 ### Optional Vercel OAuth overrides
 
-Only use these when `MCP_AUTH_MODE=oauth`.
+Only use these when Supabase OAuth Server discovery is unavailable or you are proxying to another identity provider.
 
 - `OAUTH_AUTHORIZATION_SERVER`
 - `OAUTH_AUTHORIZATION_ENDPOINT`
@@ -49,6 +57,8 @@ supabase functions deploy server --project-ref jpjxpyhuawgyrhbnnqyb
 ```
 
 4. Deploy Vercel from latest `main`.
+
+If the release only adds analytics SQL views and does not touch `api/mcp.ts`, `public/component.html`, or `supabase/functions/server/`, Vercel and Supabase function deploys are not required.
 
 ## Endpoint Verification
 
@@ -80,6 +90,26 @@ curl -sS https://figma-calgpt-project-v2.vercel.app/mcp \
   --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_progress","arguments":{"range":"90D"}}}'
 ```
 
+Expected in OAuth mode without a linked user: `tools/call` should return `isError: true` plus `_meta["mcp/www_authenticate"]`.
+
+### OAuth metadata probe
+
+```bash
+curl -sS https://figma-calgpt-project-v2.vercel.app/.well-known/oauth-protected-resource
+curl -sS https://figma-calgpt-project-v2.vercel.app/.well-known/oauth-authorization-server
+```
+
+### Beta metrics verification
+
+After analytics migrations, verify the reporting views in Supabase SQL editor:
+
+```sql
+select * from public.beta_funnel_summary;
+select * from public.beta_prompt_dropoff;
+select * from public.beta_empty_state_recovery;
+select * from public.beta_retention_summary order by cohort_date desc limit 14;
+```
+
 ## Release Gate
 
 Run before shipping:
@@ -87,7 +117,7 @@ Run before shipping:
 ```bash
 npm ci
 npm run test:strict
-MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
+MCP_AUTH_MODE=oauth MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
 ```
 
 ## Migration Drift Rule

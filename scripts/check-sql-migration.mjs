@@ -44,4 +44,35 @@ for (const table of requiredTables) {
   }
 }
 
+const allMigrations = readdirSync(migrationsDir, { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith('.sql'))
+  .map((entry) => readFileSync(new URL(entry.name, migrationsDir), 'utf8'));
+
+const hasAgentNotesMigration = allMigrations.some((migrationSql) =>
+  migrationSql.includes('create table if not exists public.agent_notes') &&
+  migrationSql.includes('alter table public.agent_notes enable row level security')
+);
+
+if (!hasAgentNotesMigration) {
+  throw new Error('Missing agent_notes migration with RLS');
+}
+
+const hasEstimationNotesMigration = allMigrations.some((migrationSql) =>
+  migrationSql.includes('alter table public.meals') &&
+  migrationSql.includes('add column if not exists estimation_notes text')
+);
+
+if (!hasEstimationNotesMigration) {
+  throw new Error('Missing estimation_notes migration');
+}
+
+const hasAnalyticsEventsMigration = allMigrations.some((migrationSql) =>
+  migrationSql.includes('create table if not exists public.analytics_events') &&
+  migrationSql.includes('alter table public.analytics_events enable row level security')
+);
+
+if (!hasAnalyticsEventsMigration) {
+  throw new Error('Missing analytics_events migration with RLS');
+}
+
 console.log(`check-sql-migration: OK (${migrationName})`);

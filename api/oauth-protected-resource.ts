@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 const OAUTH_ENABLED = process.env.MCP_AUTH_MODE?.trim().toLowerCase() === "oauth";
+const OAUTH_SCOPES = ["openid", "email", "profile"];
 
 function setCors(res: VercelResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -36,14 +37,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
   const safeHost = host.split(",")[0].trim() || "figma-calgpt-project-v2.vercel.app";
   const appOrigin = `${proto.split(",")[0].trim() || "https"}://${safeHost}`;
-
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
   const authorizationServer =
-    process.env.OAUTH_AUTHORIZATION_SERVER ?? `${appOrigin}/.well-known/oauth-authorization-server`;
+    process.env.OAUTH_AUTHORIZATION_SERVER ??
+    (supabaseUrl ? `${supabaseUrl}/auth/v1` : `${appOrigin}/.well-known/oauth-authorization-server`);
 
   return res.status(200).json({
     resource: `${appOrigin}/mcp`,
     authorization_servers: [authorizationServer],
-    scopes_supported: ["calgpt.read", "calgpt.write"],
+    scopes_supported: OAUTH_SCOPES,
     bearer_methods_supported: ["header"],
     resource_name: "CalGPT V2 MCP",
   });

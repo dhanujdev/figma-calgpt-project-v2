@@ -26,7 +26,7 @@ Use the local harness for quick widget and gateway inspection.
 - `SUPABASE_URL=https://jpjxpyhuawgyrhbnnqyb.supabase.co`
 - `SUPABASE_ANON_KEY=<anon key>`
 - `SUPABASE_MCP_ENDPOINT=https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp`
-- `MCP_AUTH_MODE=noauth`
+- `MCP_AUTH_MODE=oauth`
 - `MCP_DEFAULT_TIMEZONE=America/New_York`
 
 ### Supabase function secrets
@@ -38,10 +38,18 @@ Use the local harness for quick widget and gateway inspection.
 
 Do not put `SUPABASE_SERVICE_ROLE_KEY` in Vercel.
 
+### Supabase auth setup
+
+- Enable Google sign-in in Supabase Auth
+- Turn on Supabase Auth OAuth Server
+- Set the authorization path to `/oauth/consent`
+- Allow `https://figma-calgpt-project-v2.vercel.app/oauth/consent` as a redirect URL
+
 ## Canonical URLs
 
 - MCP connector: `https://figma-calgpt-project-v2.vercel.app/mcp`
 - Direct MCP diagnostics: `https://figma-calgpt-project-v2.vercel.app/api/mcp`
+- OAuth consent UI: `https://figma-calgpt-project-v2.vercel.app/oauth/consent`
 - Protected-resource metadata: `https://figma-calgpt-project-v2.vercel.app/.well-known/oauth-protected-resource` when `MCP_AUTH_MODE=oauth`
 - Authorization-server metadata: `https://figma-calgpt-project-v2.vercel.app/.well-known/oauth-authorization-server` when `MCP_AUTH_MODE=oauth`
 
@@ -49,7 +57,7 @@ Do not put `SUPABASE_SERVICE_ROLE_KEY` in Vercel.
 
 ```bash
 npm run test:strict
-MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
+MCP_AUTH_MODE=oauth MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
 ```
 
 If a live check fails, continue with [Runbook](./runbook.md).
