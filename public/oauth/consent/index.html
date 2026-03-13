@@ -202,7 +202,7 @@
     </section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.65.0/dist/umd/supabase.min.js"></script>
   <script>
     const query = new URLSearchParams(window.location.search);
     const authorizationId = query.get("authorization_id");
@@ -277,15 +277,19 @@
       approve.addEventListener("click", async () => {
         try {
           setBusy("Approving access...");
+          if (!supabaseClient.auth.oauth || typeof supabaseClient.auth.oauth.approveAuthorization !== "function") {
+            throw new Error("OAuth Server API not available. Make sure Supabase Third-Party Auth is enabled in your project.");
+          }
           const { data, error } = await supabaseClient.auth.oauth.approveAuthorization(authorizationId);
           if (error) throw error;
-          if (data && data.redirect_to) {
-            window.location.assign(data.redirect_to);
+          const redirectTo = data?.redirect_to || data?.redirectTo || data?.url;
+          if (redirectTo) {
+            window.location.assign(redirectTo);
             return;
           }
-          setStatus("Authorization approved. You can return to ChatGPT if redirect does not happen automatically.", "success");
+          setStatus("Authorization approved. Returning to ChatGPT... (if redirect does not happen automatically, go back to ChatGPT and reconnect)", "success");
         } catch (error) {
-          setStatus(String(error.message || error), "error");
+          setStatus("Error: " + String(error.message || error), "error");
           renderConsent(details);
         }
       });
