@@ -278,16 +278,17 @@
         try {
           setBusy("Approving access...");
           if (!supabaseClient.auth.oauth || typeof supabaseClient.auth.oauth.approveAuthorization !== "function") {
-            throw new Error("OAuth Server API not available. Make sure Supabase Third-Party Auth is enabled in your project.");
+            throw new Error("Supabase Third-Party Auth (OAuth Server) is not enabled. Go to Supabase Dashboard → Authentication → Configuration and enable Third-party Auth, then retry.");
           }
           const { data, error } = await supabaseClient.auth.oauth.approveAuthorization(authorizationId);
+          console.log("[consent] approveAuthorization response:", JSON.stringify({ data, error }));
           if (error) throw error;
           const redirectTo = data?.redirect_to || data?.redirectTo || data?.url;
           if (redirectTo) {
             window.location.assign(redirectTo);
             return;
           }
-          setStatus("Authorization approved. Returning to ChatGPT... (if redirect does not happen automatically, go back to ChatGPT and reconnect)", "success");
+          setStatus("Approved — but no redirect URL returned. Raw response: " + JSON.stringify(data), "error");
         } catch (error) {
           setStatus("Error: " + String(error.message || error), "error");
           renderConsent(details);
