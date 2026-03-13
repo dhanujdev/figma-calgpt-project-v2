@@ -32,6 +32,5 @@ jobs:
 
       - name: Smoke production MCP
         env:
-          MCP_AUTH_MODE: oauth
           MCP_BASE_URL: https://figma-calgpt-project-v2.vercel.app/mcp
         run: npm run smoke:mcp
