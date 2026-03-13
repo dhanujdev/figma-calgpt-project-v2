@@ -280,6 +280,11 @@
           if (!supabaseClient.auth.oauth || typeof supabaseClient.auth.oauth.approveAuthorization !== "function") {
             throw new Error("Supabase Third-Party Auth (OAuth Server) is not enabled. Go to Supabase Dashboard → Authentication → Configuration and enable Third-party Auth, then retry.");
           }
+          const { data: sessionData } = await supabaseClient.auth.getSession();
+          console.log("[consent] session before approve:", sessionData?.session ? `user=${sessionData.session.user?.email}, expires=${sessionData.session.expires_at}` : "NO SESSION");
+          if (!sessionData?.session) {
+            throw new Error("No active session — please sign in with Google again before approving.");
+          }
           const { data, error } = await supabaseClient.auth.oauth.approveAuthorization(authorizationId);
           if (error) {
             if (error.code === "validation_failed" || error.status === 400) {
