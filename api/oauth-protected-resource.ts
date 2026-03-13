@@ -1,5 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
+const OAUTH_ENABLED = process.env.MCP_AUTH_MODE?.trim().toLowerCase() === "oauth";
+
 function setCors(res: VercelResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -20,6 +22,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
+  if (!OAUTH_ENABLED) {
+    return res.status(404).json({ error: "Not Found" });
+  }
+
   const hostHeader = (req.headers["x-forwarded-host"] ?? req.headers.host ?? "") as
     | string
     | string[];
@@ -28,7 +34,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     | string[];
   const host = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
   const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
-  const safeHost = host.split(",")[0].trim() || "figma-calgpt-project.vercel.app";
+  const safeHost = host.split(",")[0].trim() || "figma-calgpt-project-v2.vercel.app";
   const appOrigin = `${proto.split(",")[0].trim() || "https"}://${safeHost}`;
 
   const authorizationServer =

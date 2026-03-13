@@ -29,6 +29,11 @@ const OAUTH2_SCHEME = {
   type: "oauth2",
   scopes: ["calgpt.read", "calgpt.write"],
 } as const;
+const AUTH_MODE = process.env.MCP_AUTH_MODE?.trim().toLowerCase() === "oauth" ? "oauth" : "noauth";
+const OAUTH_ENABLED = AUTH_MODE === "oauth";
+const TOOL_SECURITY_SCHEMES = OAUTH_ENABLED
+  ? ([NOAUTH_SCHEME, OAUTH2_SCHEME] as const)
+  : ([NOAUTH_SCHEME] as const);
 
 const SHARED_UI_META = {
   ui: {
@@ -43,7 +48,7 @@ type ToolDef = {
   title: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  securitySchemes: ReadonlyArray<typeof NOAUTH_SCHEME | typeof OAUTH2_SCHEME>;
+  securitySchemes: ReadonlyArray<(typeof TOOL_SECURITY_SCHEMES)[number]>;
   annotations: {
     readOnlyHint: boolean;
     destructiveHint: boolean;
@@ -54,7 +59,7 @@ type ToolDef = {
 
 function toolMeta(invoking: string, invoked: string) {
   return {
-    securitySchemes: [NOAUTH_SCHEME, OAUTH2_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     ...SHARED_UI_META,
     "openai/toolInvocation/invoking": invoking,
     "openai/toolInvocation/invoked": invoked,
@@ -80,7 +85,7 @@ const TOOL_DEFS: ToolDef[] = [
       required: ["name", "calories"],
       additionalProperties: false,
     },
-    securitySchemes: [NOAUTH_SCHEME, OAUTH2_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Logging meal...", "Meal logged"),
   },
@@ -106,7 +111,7 @@ const TOOL_DEFS: ToolDef[] = [
       },
       additionalProperties: false,
     },
-    securitySchemes: [NOAUTH_SCHEME, OAUTH2_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Syncing state...", "State synced"),
   },
@@ -123,7 +128,7 @@ const TOOL_DEFS: ToolDef[] = [
       required: ["meal_id"],
       additionalProperties: false,
     },
-    securitySchemes: [NOAUTH_SCHEME, OAUTH2_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     _meta: toolMeta("Deleting meal...", "Meal deleted"),
   },
@@ -145,7 +150,7 @@ const TOOL_DEFS: ToolDef[] = [
       },
       additionalProperties: false,
     },
-    securitySchemes: [NOAUTH_SCHEME, OAUTH2_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Updating goals...", "Goals updated"),
   },
@@ -166,7 +171,7 @@ const TOOL_DEFS: ToolDef[] = [
       required: ["weight"],
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Logging weight...", "Weight logged"),
   },
@@ -185,7 +190,7 @@ const TOOL_DEFS: ToolDef[] = [
       },
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Building progress...", "Progress ready"),
   },
@@ -208,7 +213,7 @@ const TOOL_DEFS: ToolDef[] = [
       },
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Saving preferences...", "Preferences saved"),
   },
@@ -226,7 +231,7 @@ const TOOL_DEFS: ToolDef[] = [
       required: ["image_url"],
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Saving progress photo...", "Photo saved"),
   },
@@ -246,7 +251,7 @@ const TOOL_DEFS: ToolDef[] = [
       },
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Running check-in...", "Check-in ready"),
   },
@@ -260,7 +265,7 @@ const TOOL_DEFS: ToolDef[] = [
       properties: {},
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Reviewing week...", "Weekly review ready"),
   },
@@ -274,7 +279,7 @@ const TOOL_DEFS: ToolDef[] = [
       properties: {},
       additionalProperties: false,
     },
-    securitySchemes: [OAUTH2_SCHEME, NOAUTH_SCHEME],
+    securitySchemes: TOOL_SECURITY_SCHEMES,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     _meta: toolMeta("Computing suggestions...", "Suggestions ready"),
   },
@@ -578,13 +583,14 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
       );
 
       if (toolResult.authRequired) {
+        const authMeta = OAUTH_ENABLED ? authChallengeMeta(context) : null;
         return ok(id, {
           content: [{ type: "text", text: String(toolResult.error ?? "Authentication required") }],
           structuredContent: {
             success: false,
             error: String(toolResult.error ?? "Authentication required"),
           },
-          _meta: authChallengeMeta(context),
+          ...(authMeta ? { _meta: authMeta } : {}),
           isError: true,
         });
       }
@@ -633,7 +639,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     | string[];
   const host = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
   const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
-  const safeHost = host.split(",")[0].trim() || "figma-calgpt-project.vercel.app";
+  const safeHost = host.split(",")[0].trim() || "figma-calgpt-project-v2.vercel.app";
   const appOrigin = `${proto.split(",")[0].trim() || "https"}://${safeHost}`;
 
   const incomingAuth = (req.headers["authorization"] ?? null) as string | null;

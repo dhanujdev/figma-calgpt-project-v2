@@ -50,9 +50,10 @@ Supported JSON-RPC methods:
 
 ## Auth Signaling
 
+- default auth mode is `noauth`
 - tool descriptors expose `securitySchemes`
-- protected flows may return `_meta["mcp/www_authenticate"]`
-- metadata endpoints:
+- protected flows may return `_meta["mcp/www_authenticate"]` only when `MCP_AUTH_MODE=oauth`
+- OAuth metadata endpoints exist only when `MCP_AUTH_MODE=oauth`:
   - `/.well-known/oauth-protected-resource`
   - `/.well-known/oauth-authorization-server`
 

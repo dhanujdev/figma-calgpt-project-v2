@@ -2,8 +2,8 @@
 
 ## Locked Production Targets
 
-- Public MCP URL: `https://figma-calgpt-project.vercel.app/mcp`
-- Diagnostic MCP URL: `https://figma-calgpt-project.vercel.app/api/mcp`
+- Public MCP URL: `https://figma-calgpt-project-v2.vercel.app/mcp`
+- Diagnostic MCP URL: `https://figma-calgpt-project-v2.vercel.app/api/mcp`
 - Widget URI: `ui://widget/gpt-calories-v4.html`
 - Supabase function endpoint: `https://jpjxpyhuawgyrhbnnqyb.supabase.co/functions/v1/server/mcp`
 
@@ -14,6 +14,7 @@
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_MCP_ENDPOINT`
+- `MCP_AUTH_MODE=noauth` for the current ChatGPT connector path
 
 ### Supabase function secrets
 
@@ -22,6 +23,8 @@
 - `ALLOW_DEMO_MODE=false`
 
 ### Optional Vercel OAuth overrides
+
+Only use these when `MCP_AUTH_MODE=oauth`.
 
 - `OAUTH_AUTHORIZATION_SERVER`
 - `OAUTH_AUTHORIZATION_ENDPOINT`
@@ -62,15 +65,15 @@ Expected: `200`.
 ### MCP probe through Vercel
 
 ```bash
-curl -sS https://figma-calgpt-project.vercel.app/mcp \
+curl -sS https://figma-calgpt-project-v2.vercel.app/mcp \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 
-curl -sS https://figma-calgpt-project.vercel.app/mcp \
+curl -sS https://figma-calgpt-project-v2.vercel.app/mcp \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sync_state","arguments":{}}}'
 
-curl -sS https://figma-calgpt-project.vercel.app/mcp \
+curl -sS https://figma-calgpt-project-v2.vercel.app/mcp \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_progress","arguments":{"range":"90D"}}}'
 ```
@@ -82,7 +85,7 @@ Run before shipping:
 ```bash
 npm ci
 npm run test:strict
-MCP_BASE_URL=https://figma-calgpt-project.vercel.app/mcp npm run smoke:mcp
+MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
 ```
 
 ## Migration Drift Rule

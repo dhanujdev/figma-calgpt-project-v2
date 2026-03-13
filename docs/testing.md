@@ -18,13 +18,13 @@ Current gate:
 ## Live MCP Smoke
 
 ```bash
-MCP_BASE_URL=https://figma-calgpt-project.vercel.app/mcp npm run smoke:mcp
+MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/mcp npm run smoke:mcp
 ```
 
 Diagnostic fallback:
 
 ```bash
-MCP_BASE_URL=https://figma-calgpt-project.vercel.app/api/mcp npm run smoke:mcp
+MCP_BASE_URL=https://figma-calgpt-project-v2.vercel.app/api/mcp npm run smoke:mcp
 ```
 
 ## Production Acceptance
@@ -36,10 +36,11 @@ MCP_BASE_URL=https://figma-calgpt-project.vercel.app/api/mcp npm run smoke:mcp
 - `POST /mcp tools/call sync_state` -> success
 - `POST /mcp tools/call get_progress` -> success
 
-### OAuth metadata
+### OAuth metadata when enabled
 
-- `GET /.well-known/oauth-protected-resource` -> `200`
-- `GET /.well-known/oauth-authorization-server` -> `200`
+- `GET /.well-known/oauth-protected-resource` -> `200` only when `MCP_AUTH_MODE=oauth`
+- `GET /.well-known/oauth-authorization-server` -> `200` only when `MCP_AUTH_MODE=oauth`
+- otherwise both routes should return `404`
 
 ### ChatGPT checks
 
