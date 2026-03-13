@@ -549,7 +549,19 @@
       weeklyReview: null,
       lastAction: null,
       mode: 'demo',
+      currentDate: null,
     };
+
+    function todayIso() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+
+    function offsetDate(iso, days) {
+      const d = new Date(`${iso}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + days);
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+    }
 
     const DEFAULT_STARTER_PROMPTS = [
       'Show my dashboard.',
@@ -779,12 +791,14 @@
       return Boolean(state.model || state.progress || state.weeklyReview || state.checkinData);
     }
 
-    async function sync(page = state.page) {
+    async function sync(page = state.page, date = null) {
       state.busy = true;
       state.error = '';
       render();
       try {
-        const payload = await callTool('sync_state', { page, range: '90D' });
+        const args = { page, range: '90D' };
+        if (date) args.date = date;
+        const payload = await callTool('sync_state', args);
         if (payload.state) {
           state.model = payload.state;
         } else if (payload.goals && Array.isArray(payload.meals)) {
@@ -954,7 +968,22 @@
 
       return `
         ${renderLastAction()}
-        ${renderPageHeader('Dashboard', 'Today', `${fmtDate(model.date)}. Read calories first, then macros, then meals.`)}
+        ${(function() {
+          const today = todayIso();
+          const currentDate = state.currentDate || model.date || today;
+          const isToday = currentDate === today;
+          const dateLabel = isToday ? 'Today' : fmtDate(currentDate);
+          return `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px 2px">
+              <button class="ghost" data-action="prev-day" style="padding:4px 10px;font-size:18px" title="Previous day">&#8592;</button>
+              <div style="text-align:center">
+                <div style="font-weight:700;font-size:15px">${escapeHtml(dateLabel)}</div>
+                <div class="subtle" style="font-size:11px">${fmtDate(currentDate)}</div>
+              </div>
+              <button class="ghost" data-action="next-day" style="padding:4px 10px;font-size:18px" ${isToday ? 'disabled style="opacity:0.3;padding:4px 10px;font-size:18px"' : ''} title="Next day">&#8594;</button>
+            </div>
+          `;
+        })()}
         ${showStarterGuide ? renderPromptGuide('Start here', 'New users succeed fastest by asking for one concrete action in chat. Try one of these prompts.') : ''}
         <div class="overview-grid">
           <div class="focus-panel soft">
@@ -1228,7 +1257,25 @@
         state.error = '';
 
         if (action === 'sync') {
+          state.currentDate = null;
           await sync(state.page);
+          return;
+        }
+
+        if (action === 'prev-day') {
+          const base = state.currentDate || state.model?.date || todayIso();
+          state.currentDate = offsetDate(base, -1);
+          await sync('home', state.currentDate);
+          return;
+        }
+
+        if (action === 'next-day') {
+          const base = state.currentDate || state.model?.date || todayIso();
+          const next = offsetDate(base, 1);
+          if (next <= todayIso()) {
+            state.currentDate = next;
+            await sync('home', state.currentDate);
+          }
           return;
         }
       } catch (error) {

@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import * as Sentry from "@sentry/node";
 import { readFileSync } from "fs";
 import path from "path";
 
@@ -22,6 +23,12 @@ const SERVER_INFO = {
   name: "gpt-calories-mcp",
   version: "2.0.0",
 };
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  tracesSampleRate: 1.0,
+  environment: process.env.VERCEL_ENV || "development",
+});
 
 const WIDGET_VERSION = "v13";
 const WIDGET_URI = `ui://widget/gpt-calories-${WIDGET_VERSION}.html`;
@@ -82,7 +89,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "log_meal",
     title: "Log meal",
     description:
-      "Use this when the user asks you in chat to log a meal with calories/macros for today's record, including cases where you estimated the meal and want to save a short note about that estimate. Call it directly instead of announcing the tool call first, then reply with one concise confirmation and only the most important changed totals.",
+      "Use this when the user asks you in chat to log a meal with calories/macros, for today or any past date. If the user says 'yesterday' or 'last Tuesday', convert it to a YYYY-MM-DD date string and pass it as the date param. Call it directly instead of announcing the tool call first, then reply with one concise confirmation and only the most important changed totals.",
     inputSchema: {
       type: "object",
       properties: {
@@ -108,7 +115,7 @@ const TOOL_DEFS: ToolDef[] = [
     name: "sync_state",
     title: "Sync state",
     description:
-      "Use this when the user asks to see their dashboard, progress, or settings, or when the assistant needs the latest daily totals, goals, preferences, progress, and onboarding state before replying. Call it directly without preamble, then keep the follow-up to a short orientation instead of repeating every visible value from the widget.",
+      "Use this when the user asks to see their dashboard, progress, or settings, or when the assistant needs the latest daily totals, goals, preferences, progress, and onboarding state before replying. Pass a date param (YYYY-MM-DD) to view a past day — convert 'yesterday' or 'last Tuesday' to the ISO date first. Call it directly without preamble, then keep the follow-up to a short orientation instead of repeating every visible value from the widget.",
     inputSchema: {
       type: "object",
       properties: {
@@ -898,6 +905,9 @@ async function handleSingleRpc(rpc: JsonRpcRequest, context: RpcContext) {
         isError,
       });
     } catch (error) {
+      Sentry.captureException(error, {
+        extra: { toolName, toolArgs },
+      });
       return ok(id, {
         content: [
           {
@@ -943,7 +953,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const context: RpcContext = {
     appOrigin,
     supabaseUrl: process.env.SUPABASE_URL,
-    incomingAuthHeader: incomingAuth,
+    incomingAuthHeader: incomingAuth || undefined,
     incomingTimeZone: incomingTimeZone?.trim() || DEFAULT_TIMEZONE,
   };
 
@@ -981,6 +991,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     return res.status(200).json(response);
   } catch (error) {
+    Sentry.captureException(error);
     return res.status(400).json(err(null, -32700, `Parse error: ${String(error)}`));
   }
 }

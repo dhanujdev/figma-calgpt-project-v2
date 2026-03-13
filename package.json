@@ -15,6 +15,7 @@
     "test:strict": "npm run check:mcp-contract && npm run check:widget-contract && npm run check:sql-migration && npm run check:ui-shell && npm run test:unit && npm run build && npm run smoke:mcp"
   },
   "dependencies": {
+    "@sentry/node": "^10.43.0",
     "clsx": "2.1.1",
     "playwright": "^1.58.2",
     "react": "18.3.1",
