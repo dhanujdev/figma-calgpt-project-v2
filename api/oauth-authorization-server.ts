@@ -48,51 +48,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const safeHost = host.split(",")[0].trim() || "figma-calgpt-project-v2.vercel.app";
   const appOrigin = `${proto.split(",")[0].trim() || "https"}://${safeHost}`;
 
-  const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  const hasOverrideEndpoints = Boolean(
-    process.env.OAUTH_AUTHORIZATION_SERVER ||
-      process.env.OAUTH_AUTHORIZATION_ENDPOINT ||
-      process.env.OAUTH_TOKEN_ENDPOINT ||
-      process.env.OAUTH_REGISTRATION_ENDPOINT,
-  );
-
-  if (supabaseUrl && !hasOverrideEndpoints) {
-    try {
-      const discovery = await fetchSupabaseDiscovery(supabaseUrl);
-      return res.status(200).json(discovery);
-    } catch (error) {
-      return res.status(502).json({
-        error: "OAuth authorization metadata unavailable",
-        detail: String(error),
-      });
-    }
-  }
-
-  const defaultIssuer = supabaseUrl ? `${supabaseUrl}/auth/v1` : appOrigin;
-  const authorizationEndpoint =
-    process.env.OAUTH_AUTHORIZATION_ENDPOINT ??
-    (supabaseUrl ? `${supabaseUrl}/auth/v1/authorize` : `${appOrigin}/oauth/authorize`);
-  const tokenEndpoint =
-    process.env.OAUTH_TOKEN_ENDPOINT ??
-    (supabaseUrl ? `${supabaseUrl}/auth/v1/token` : `${appOrigin}/oauth/token`);
-  const registrationEndpoint = process.env.OAUTH_REGISTRATION_ENDPOINT;
-
-  if (!registrationEndpoint) {
-    return res.status(500).json({
-      error: "Missing OAuth registration endpoint",
-      detail:
-        "Configure Supabase OAuth Server discovery or set OAUTH_REGISTRATION_ENDPOINT explicitly.",
-    });
-  }
-
+  // Use CalGPT's own OAuth proxy endpoints — bypasses Supabase Third-Party Auth
+  // which requires session-linkage that standalone Google sign-in cannot satisfy.
   return res.status(200).json({
-    issuer: process.env.OAUTH_AUTHORIZATION_SERVER ?? defaultIssuer,
-    authorization_endpoint: authorizationEndpoint,
-    token_endpoint: tokenEndpoint,
-    registration_endpoint: registrationEndpoint,
+    issuer: appOrigin,
+    authorization_endpoint: `${appOrigin}/api/oauth-authorize`,
+    token_endpoint: `${appOrigin}/api/oauth-token`,
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code", "refresh_token"],
-    token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+    grant_types_supported: ["authorization_code"],
+    token_endpoint_auth_methods_supported: ["none"],
     scopes_supported: OAUTH_SCOPES,
     code_challenge_methods_supported: ["S256"],
   });

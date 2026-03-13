@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CalGPT — Completing sign-in...</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: ui-sans-serif, -apple-system, sans-serif;
+      background: #f6f3ee; color: #1d1a16; }
+    .card { background: #fff; border-radius: 16px; padding: 32px 40px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.08); text-align: center; max-width: 360px; }
+    h2 { margin: 0 0 8px; font-size: 20px; }
+    p  { margin: 0; color: #6c645b; font-size: 14px; }
+    .error { color: #b42318; font-size: 13px; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 id="title">Completing sign-in…</h2>
+    <p  id="sub">Redirecting you back to ChatGPT.</p>
+    <p  id="err" class="error"></p>
+  </div>
+  <script>
+    function getCookie(name) {
+      const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : null;
+    }
+
+    function fail(msg) {
+      document.getElementById('title').textContent = 'Sign-in failed';
+      document.getElementById('sub').textContent = 'Please go back to ChatGPT and try connecting again.';
+      document.getElementById('err').textContent = msg;
+    }
+
+    function run() {
+      // Supabase puts tokens in the URL hash after Google sign-in (implicit flow)
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const accessToken  = hash.get('access_token');
+      const refreshToken = hash.get('refresh_token');
+
+      if (!accessToken) {
+        fail('No access token received from Google sign-in.');
+        return;
+      }
+
+      // Read the OAuth request params we stored in the cookie during /api/oauth/authorize
+      const raw = getCookie('calgpt_oauth');
+      if (!raw) {
+        fail('OAuth session cookie missing or expired. Please try again.');
+        return;
+      }
+
+      let oauthParams;
+      try {
+        oauthParams = JSON.parse(atob(raw.replace(/-/g,'+').replace(/_/g,'/')));
+      } catch {
+        fail('OAuth session cookie is corrupted. Please try again.');
+        return;
+      }
+
+      const { redirect_uri, state } = oauthParams;
+      if (!redirect_uri || !state) {
+        fail('Missing redirect_uri or state in OAuth session.');
+        return;
+      }
+
+      // Encode the Supabase tokens as the "code" — the token endpoint just decodes this
+      const code = btoa(JSON.stringify({ at: accessToken, rt: refreshToken || '' }))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+      // Clear the cookie
+      document.cookie = 'calgpt_oauth=; Path=/; Max-Age=0';
+
+      // Redirect back to ChatGPT with the auth code
+      const finalUrl = new URL(redirect_uri);
+      finalUrl.searchParams.set('code', code);
+      finalUrl.searchParams.set('state', state);
+
+      document.getElementById('sub').textContent = 'Redirecting to ChatGPT…';
+      window.location.assign(finalUrl.toString());
+    }
+
+    run();
+  </script>
+</body>
+</html>
