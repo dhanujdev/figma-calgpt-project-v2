@@ -281,8 +281,12 @@
             throw new Error("Supabase Third-Party Auth (OAuth Server) is not enabled. Go to Supabase Dashboard → Authentication → Configuration and enable Third-party Auth, then retry.");
           }
           const { data, error } = await supabaseClient.auth.oauth.approveAuthorization(authorizationId);
-          console.log("[consent] approveAuthorization response:", JSON.stringify({ data, error }));
-          if (error) throw error;
+          if (error) {
+            if (error.code === "validation_failed" || error.status === 400) {
+              throw new Error("This authorization request has expired. Go back to ChatGPT, disconnect and reconnect CalGPT, then approve immediately.");
+            }
+            throw error;
+          }
           const redirectTo = data?.redirect_to || data?.redirectTo || data?.url;
           if (redirectTo) {
             window.location.assign(redirectTo);
