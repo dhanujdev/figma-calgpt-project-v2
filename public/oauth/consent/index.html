@@ -318,6 +318,25 @@
       setStatus("Review the permissions above, then approve to finish linking CalGPT in ChatGPT.", null);
     }
 
+    async function restoreSessionFromHash() {
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      const accessToken = hash.get("access_token");
+      const refreshToken = hash.get("refresh_token");
+
+      if (!accessToken || !refreshToken) {
+        return false;
+      }
+
+      const { error } = await supabaseClient.auth.setSession({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      });
+      if (error) throw error;
+
+      window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
+      return true;
+    }
+
     async function init() {
       if (!authorizationId) {
         setStatus("Missing authorization request. Reconnect CalGPT from ChatGPT and try again.", "error");
@@ -349,6 +368,10 @@
         // and Supabase will reject approveAuthorization with 400 validation_failed.
         const hasReturnedFromOAuth = window.location.hash.includes("access_token") ||
           new URLSearchParams(window.location.search).has("code");
+
+        if (window.location.hash.includes("access_token")) {
+          await restoreSessionFromHash();
+        }
 
         const {
           data: { session },
